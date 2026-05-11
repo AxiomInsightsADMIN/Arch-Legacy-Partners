@@ -37,9 +37,9 @@ for daily progress entries.
 ## Layout
 
 ```
-/scrapers/         per-source loaders (federal, texas, north_carolina, counties, discovery)
-/db/migrations/    SQL migrations applied to Supabase
-/enrichment/       LLM waste-type enrichment + caching
+/scrapers/             per-source loaders (federal, texas, north_carolina, counties, discovery)
+/supabase/migrations/  SQL migrations applied to Supabase via `supabase db push`
+/enrichment/           LLM waste-type enrichment + caching
 /exports/          CSV export scripts (primary + provenance)
 /orchestration/    cross-cutting drivers, entity resolution, drift detection
 /config/           controlled vocabularies, source registry seeds, budget caps

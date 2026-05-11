@@ -10,8 +10,9 @@ State-consistency warning policy (Checkpoint-2 decision A1.6)
 ================================================================================
 
 Background. The `canonical_facility` table's latitude/longitude CHECK
-constraints in `db/migrations/0001_initial.sql` are intentionally **global**
-(lat -90..90, long -180..180) rather than per-state envelopes. Reason:
+constraints in `supabase/migrations/20260511203500_initial.sql` are
+intentionally **global** (lat -90..90, long -180..180) rather than
+per-state envelopes. Reason:
 forward-compat. The kickoff brief allows $40/state additions after v1
 delivery; we don't want a schema migration for every new state.
 

@@ -1,4 +1,4 @@
-"""Static-text tests for db/migrations/0002_source_seed.sql.
+"""Static-text tests for supabase/migrations/20260511203501_source_seed.sql.
 
 These are *file-level* assertions — they read the SQL as text without
 applying it. The actual schema-apply happens in CI in the `schema` job
@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-SEED = Path(__file__).resolve().parent.parent / "db" / "migrations" / "0002_source_seed.sql"
+SEED = (
+    Path(__file__).resolve().parent.parent
+    / "supabase"
+    / "migrations"
+    / "20260511203501_source_seed.sql"
+)
 
 EXPECTED_SLUGS = [
     "epa_echo",

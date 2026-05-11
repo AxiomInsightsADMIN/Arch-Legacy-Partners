@@ -148,7 +148,7 @@ jobs:
 
       - name: Apply 0001_initial.sql
         run: |
-          psql -v ON_ERROR_STOP=1 -f db/migrations/0001_initial.sql
+          psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260511203500_initial.sql
 
       - name: Inspect tables created (sanity)
         run: |
@@ -157,7 +157,7 @@ jobs:
 
       - name: Apply 0002_source_seed.sql
         run: |
-          psql -v ON_ERROR_STOP=1 -f db/migrations/0002_source_seed.sql
+          psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260511203501_source_seed.sql
 
       - name: Verify source table has exactly 12 rows
         run: |
@@ -198,7 +198,7 @@ jobs:
 
       - name: Idempotency check — re-apply seed (ON CONFLICT DO UPDATE)
         run: |
-          psql -v ON_ERROR_STOP=1 -f db/migrations/0002_source_seed.sql
+          psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260511203501_source_seed.sql
           count=$(psql -tA -c "SELECT COUNT(*) FROM source;")
           if [ "$count" != "12" ]; then
             echo "FAIL: re-apply changed row count to $count (expected 12)"
