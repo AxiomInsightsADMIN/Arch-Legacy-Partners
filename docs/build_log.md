@@ -6,6 +6,82 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-11 — Day 2 step 1 (EPA ECHO loader)
+
+**Completed**
+- Restructure commit `8cffbf2` landed cleanly: migrations moved from
+  `db/migrations/` to `supabase/migrations/` with `<YYYYMMDDHHMMSS>_name.sql`
+  naming. Single source of truth. Git rename detection at 100%; no byte
+  changes on the SQL files themselves. `db/` tree removed. CI green on the
+  new layout. Pooler sanity query via `.env` confirmed working
+  (`SELECT COUNT(*) FROM source = 12`).
+- **ECHO loader** at `scrapers/federal/epa_echo.py` — two-step REST flow
+  (`get_facilities` → QID, `get_download` → CSV with qcolumns 1..34). Batch
+  upsert into `raw_facility_record` with payload-hash-based no-change
+  detection. Writes `scraper_run` + `source_signature` rows. Idempotent
+  re-runs.
+- Loaded TX and NC active CWA facilities. **92,326 raw rows inserted** total
+  (72,499 TX + 19,827 NC — exact match to the Phase-0 audit predictions).
+  - TX run: 81.4 s, `scraper_run.id=1`, `status=success`.
+  - NC run: 26.6 s, `scraper_run.id=2`, `status=success`.
+  - Schema hash identical across both states (`699dec10fc9a…`).
+  - HTTP 200 on every setup + download call.
+- Sample row (TX, POTW): `CITY OF PORT ARTHUR MAIN WWTP / TX0047589 / PORT
+  ARTHUR / POTW`.
+
+**Anomaly observed (informational, not a failure)**
+- ECHO's `p_st` filter is **jurisdictional**, not geographic. Of 92,326
+  rows, **11** (0.012%) have `CWPState ≠ 'TX' AND CWPState ≠ 'NC'`.
+  Physical-state distribution: OK=3, VA=2, LA=2, SC=2, MD=1, AR=1 (= 11).
+  Pull-origin attribution by pull-side arithmetic: TX pull contributed
+  72,499 − 72,493 = **6** cross-state rows; NC pull contributed
+  19,827 − 19,822 = **5** cross-state rows. Sum: 11. Reconciliation:
+  72,493 TX + 19,822 NC + 11 cross = 92,326 ✓. Per-row pull-origin can be
+  rederived later via `scraper_run_id` if needed; not required for
+  Phase 3 handling.
+- **Phase 3 filter rule (LOCKED):** the resolver in Phase 3 (Days 5-6)
+  MUST filter raw rows where `raw_payload->>'CWPState' NOT IN ('TX', 'NC')`
+  so cross-state rows never produce canonical entities. The filter is
+  defined by the project's **state coverage set** — when a new state ships
+  post-delivery, the filter widens via the same mechanism. Do not bypass
+  the filter for cross-state rows when adding new states; instead, append
+  the new USPS code to the coverage set. The rule applies to all sources
+  whose query interfaces are jurisdictional rather than geographic (ECHO,
+  any state-NPDES queries that join multi-state regions, and any future
+  source with similar semantics). This entry is the canonical reference;
+  Phase 3 design notes must restate the rule verbatim or link here.
+
+**In progress**
+- Step 2 of Phase 1 Day 2 — CWNS APEX `download-state-zip` spike (30-min
+  time-box). Starts after this commit lands and CI confirms green.
+
+**Blocked / pending**
+- Ryan's go-ahead to start step 2 (after CI confirms green on this commit).
+- Step 3 (CWNS loader) is gated on the outcome of step 2.
+
+**Decisions made**
+- ECHO column codes: `qcolumns=1..34` returns 34 useful columns including
+  `RegistryID` (FRS), `SourceID` (NPDES), `CWPState`, `CWPZip`, `CWPCounty`,
+  `FacLat`, `FacLong`, and `CWPFacilityTypeIndicator` — closing the audit's
+  recorded gap. The default no-qcolumns response returns only 16 columns
+  and is missing state/zip/county/FRS, so qcolumns is required.
+- Source-record-id: prefer `SourceID` (NPDES), fall back to
+  `FRS:<RegistryID>` when SourceID is blank. Never write a raw row without
+  a stable identifier; skip-with-counter and continue.
+- Idempotency: `ON CONFLICT (source_id, source_record_id) DO UPDATE … WHERE
+  raw_facility_record.payload_hash <> EXCLUDED.payload_hash` so unchanged
+  rows are a no-op write. `RETURNING (xmax = 0)` distinguishes inserts from
+  updates. Unchanged rows are not in the RETURNING; we compute the
+  unchanged count as `batch_size - inserted - updated`.
+- Per-batch commits at `BATCH_SIZE=500`. ~145 commits for 72k TX rows;
+  total commit overhead negligible vs. a single transaction's
+  memory/pooler risk on free-tier.
+
+**Deviations from the brief**
+- None.
+
+---
+
 ## 2026-05-11 — Day 1 (post-task-8 checkpoint: tasks 9–10, both checkpoint reviews approved)
 
 **Completed**
