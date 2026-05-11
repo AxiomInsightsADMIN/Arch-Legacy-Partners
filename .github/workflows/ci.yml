@@ -182,9 +182,9 @@ jobs:
       # "13 or more" floor and surfaces unintended additions or removals
       # as a CI failure.
       # ------------------------------------------------------------------
-      - name: Verify source slug set matches the expected 13
+      - name: Verify source slug set matches the expected 16
         run: |
-          expected="county_health_placeholder discovery_crawl epa_cwns_2022 epa_echo nc_deq_dwm nc_deq_dwr operator_sites_placeholder state_npdes state_registries_placeholder tceq_central_registry tceq_domestic_wastewater tceq_msw_facilities_xls tceq_public_data_lookup"
+          expected="county_health_placeholder discovery_crawl epa_cwns_2022 epa_echo nc_deq_dwm nc_deq_dwr nc_deq_non_discharge_facilities nc_deq_septage_firm_list nc_deq_solid_waste_facility_list operator_sites_placeholder state_npdes state_registries_placeholder tceq_central_registry tceq_domestic_wastewater tceq_msw_facilities_xls tceq_public_data_lookup"
           # Total count
           count=$(psql -tA -c "SELECT COUNT(*) FROM source;")
           echo "source row count: $count"
@@ -200,7 +200,7 @@ jobs:
             psql -c "SELECT slug, type, robots_txt_status FROM source ORDER BY slug;"
             exit 1
           fi
-          echo "PASS: source has 13 rows with the expected slug set."
+          echo "PASS: source has 16 rows with the expected slug set."
 
       - name: Verify tceq_central_registry is robots-disallowed
         run: |
@@ -247,8 +247,8 @@ jobs:
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
           count=$(psql -tA -c "SELECT COUNT(*) FROM source;")
-          if [ "$count" != "13" ]; then
-            echo "FAIL: re-apply changed source row count to $count (expected 13)"
+          if [ "$count" != "16" ]; then
+            echo "FAIL: re-apply changed source row count to $count (expected 16)"
             exit 1
           fi
           echo "PASS: seed migrations are idempotent."
