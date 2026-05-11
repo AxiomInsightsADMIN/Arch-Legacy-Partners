@@ -221,7 +221,11 @@ def _flush_batch(cur, batch: list[tuple]) -> tuple[int, int]:
     if not batch:
         return 0, 0
     result = psycopg2.extras.execute_values(
-        cur, UPSERT_SQL, batch, fetch=True, page_size=BATCH_SIZE,
+        cur,
+        UPSERT_SQL,
+        batch,
+        fetch=True,
+        page_size=BATCH_SIZE,
     )
     inserted = sum(1 for r in result if r[0])
     updated = sum(1 for r in result if not r[0])
@@ -229,9 +233,14 @@ def _flush_batch(cur, batch: list[tuple]) -> tuple[int, int]:
 
 
 def write_signature_with_last_modified(
-    cur, *, source_id: int, run_id: int,
-    http_status: int | None, byte_size: int,
-    schema_hash: str | None, row_count: int,
+    cur,
+    *,
+    source_id: int,
+    run_id: int,
+    http_status: int | None,
+    byte_size: int,
+    schema_hash: str | None,
+    row_count: int,
     last_modified: str | None,
 ) -> None:
     cur.execute(
@@ -241,8 +250,7 @@ def write_signature_with_last_modified(
              schema_hash, row_count, last_modified)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
-        (source_id, run_id, http_status, byte_size, schema_hash, row_count,
-         last_modified),
+        (source_id, run_id, http_status, byte_size, schema_hash, row_count, last_modified),
     )
 
 
@@ -286,8 +294,7 @@ def load() -> LoadResult:
     res.sheet_name = sheet_name
     res.last_modified = _content_date_from_sheet_name(sheet_name)
     print(
-        f"[NC SF]   sheet={sheet_name!r}  "
-        f"content-date -> last_modified={res.last_modified!r}",
+        f"[NC SF]   sheet={sheet_name!r}  content-date -> last_modified={res.last_modified!r}",
         flush=True,
     )
 
@@ -308,7 +315,9 @@ def load() -> LoadResult:
     # 3) Out-of-state county count (informational; rows stay in the load)
     if COUNTY_COLUMN in df.columns:
         res.out_of_state_rows = int(
-            (df[COUNTY_COLUMN].fillna("").astype(str).str.strip() == OUT_OF_STATE_COUNTY_VALUE).sum()
+            (
+                df[COUNTY_COLUMN].fillna("").astype(str).str.strip() == OUT_OF_STATE_COUNTY_VALUE
+            ).sum()
         )
         print(
             f"[NC SF]   out-of-state firms (County={OUT_OF_STATE_COUNTY_VALUE!r}): "
@@ -360,14 +369,19 @@ def load() -> LoadResult:
             conn.commit()
 
         write_signature_with_last_modified(
-            cur, source_id=source_id, run_id=run_id,
+            cur,
+            source_id=source_id,
+            run_id=run_id,
             http_status=None,  # manual_drop path: no HTTP status
             byte_size=res.download_bytes,
-            schema_hash=res.schema_hash, row_count=res.rows_parsed,
+            schema_hash=res.schema_hash,
+            row_count=res.rows_parsed,
             last_modified=res.last_modified,
         )
         finish_run(
-            cur, run_id, "success",
+            cur,
+            run_id,
+            "success",
             rows_in=res.rows_parsed,
             rows_inserted=res.rows_inserted,
             rows_updated=res.rows_updated,
@@ -379,7 +393,9 @@ def load() -> LoadResult:
         conn.rollback()
         try:
             finish_run(
-                cur, run_id, "failed",
+                cur,
+                run_id,
+                "failed",
                 rows_in=res.rows_parsed,
                 rows_inserted=res.rows_inserted,
                 rows_updated=res.rows_updated,
