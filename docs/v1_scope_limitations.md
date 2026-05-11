@@ -197,18 +197,98 @@ contract us to file on their behalf.
 
 ---
 
-## 4. Non-TCEQ analogues — when this matters for other states
+## 4. NC DEQ edocs document-repo TCP block
+
+**Finding.** NC Department of Environmental Quality publishes the two
+master facility rosters that gate v1 NC coverage on their Laserfiche
+document repository at `edocs.deq.nc.gov`:
+
+- "Solid Waste Permitted Facilities" — transfer stations, composting,
+  landfills, and treatment/processing operations.
+- "Septage Firm" — registered septage firms (NC's haulers + SDTF +
+  SLAS operators).
+
+The linking page at
+`https://www.deq.nc.gov/about/divisions/waste-management/solid-waste-section/solid-waste-permitted-facility-information-and-guidance/solid-waste-facility-lists`
+is fully robots-permissive. The host of the documents themselves —
+`edocs.deq.nc.gov` — is reachable via DNS but **refuses TCP
+connections from our probe IP**. Three independent fetch attempts on
+2026-05-11 returned 30-second connect timeouts. This is **not** a
+robots.txt issue (the host doesn't respond enough to serve a
+`robots.txt` either); it is a network-level constraint, likely a
+geofencing or anti-bot WAF rule.
+
+**Affected categories for NC**
+
+| Category | Path that's blocked | Coverage impact |
+|---|---|---|
+| 3 (Land application sites) | Secondary path — the SLAS subset of the Septage Firm list and any biosolids residuals on the SW facilities list | Mitigated: ArcGIS-based primary path (NC OneMap Non-Discharge FeatureServer) is unaffected |
+| **4 (Private / regional septage)** | **Primary path — Septage Firm master list** | Significant — no allowed-path alternative on the main site |
+| **5 (Composting)** | **Primary path — SW Permitted Facilities master list** | Significant — Phase-4.5 discovery + EPA ECHO partial corroboration are the alternatives |
+| **6 (Anaerobic digesters)** | Primary path — SW Permitted Facilities (beneficial-gas-recovery permits) | Mitigated: ECHO partial + Phase-4.5 discovery |
+| **7 (Transfer stations)** | **Primary path — SW Permitted Facilities master list** | Significant — no allowed-path alternative on the main site |
+
+**Forward path: Playwright + manual fallback**
+
+The constraint pattern matches what we saw with the EPA CWNS APEX app
+(programmatic access blocked even though a real browser can reach
+the host). The Phase-2 NC loader for the two edocs PDFs will use
+Playwright + Chromium first (browser TLS fingerprint typically passes
+WAF rules that vanilla `requests` fails), exactly the way the Phase-1
+CWNS loader does for the APEX state-zip flow.
+
+If Playwright is also blocked (e.g., the WAF rule is IP-based, not
+fingerprint-based), the fallback for the client is a manual one-off
+download from a North-Carolina or US-East egress, mirroring the
+Texas Public Information Act path described in section 3 above:
+
+1. **Where the documents live (linking page).**
+   `https://www.deq.nc.gov/about/divisions/waste-management/solid-waste-section/solid-waste-permitted-facility-information-and-guidance/solid-waste-facility-lists`
+2. **The two specific document URLs:**
+   - SW Permitted Facilities (docid 2132701):
+     `https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132701&dbid=0&repo=WasteManagement`
+   - Septage Firm (docid 2132702):
+     `https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132702&dbid=0&repo=WasteManagement`
+3. **Manual procedure if Playwright fails.** A client team member with
+   access from any IP that edocs accepts opens both URLs, downloads the
+   PDFs (or whatever format edocs returns), forwards them to Axiom
+   Insights, and we ingest via a one-off migration with
+   `extraction_method='manual'` on each row's `field_provenance`. Same
+   ingestion shape as the Texas TPIA-response path. No special
+   credentials required from the client; this is public-record data.
+4. **Re-test cadence.** Phase-5 monthly cron will re-probe edocs on
+   each refresh. Network constraints sometimes self-resolve (WAF
+   fingerprint rotation, throttling cooldown, etc.). If the network
+   constraint disappears, the loader silently transitions back to
+   automated fetch with no migration needed.
+
+**What is NOT affected on the NC side**
+
+- EPA ECHO's NC POTW coverage (19,827 raw rows; 287 POTW) is already
+  loaded and is unrelated to edocs.
+- The NC OneMap ArcGIS FeatureServer at `services.nconemap.gov` is
+  reachable and serves the Non-Discharge facility map data without
+  Playwright. Category 3 v1 coverage in NC is delivered via this
+  path.
+
+This is a **smaller** v1 concession than the TX one. TX lost
+state-level POTW permit detail and the entire Septage Transporter
+registry from automated paths. NC's situation is narrower: the
+documents are public and linked, the access is just gated at the
+network layer, and Playwright is a credible first try.
+
+## 5. Non-TCEQ / non-NC analogues — when this matters for other states
 
 The TCEQ pattern (open static-XLS + locked-down query subdomains) is
-specific to Texas. NC DEQ has different access controls and will be
-audited independently in Phase 2's NC DEQ DWR/DWM sub-audit. The TX
-concession in this document **does not automatically apply to NC** or
-to any state added after v1 delivery. Each state's source audit is
-its own document.
+specific to Texas. The NC DEQ pattern (open document references +
+gated document host) is specific to North Carolina. Each new state
+added after v1 delivery gets its own source audit. **Neither the TX
+nor the NC concession in this document automatically applies to other
+states.** Each state's audit is its own document.
 
 ---
 
-## 5. Forward roadmap (out of v1 scope)
+## 6. Forward roadmap (out of v1 scope)
 
 These items are out of v1 scope but worth noting so the client knows
 the gap is not permanent:
@@ -230,11 +310,12 @@ the gap is not permanent:
 
 ---
 
-## 6. Audit trail
+## 7. Audit trail
 
 This document is the canonical reference for the items above. The
 chronology lives in `docs/build_log.md`. The TCEQ audit detail lives
-in `docs/tceq_pdl_audit.md`. Any future v1-scope concession discovered
-during Phase 2–5 will be appended as a new top-level section here, not
-written separately, so the client gets a single page of constraints
-at handoff.
+in `docs/tceq_pdl_audit.md`. The NC DEQ audit detail lives in
+`docs/nc_deq_audit.md`. Any future v1-scope concession discovered
+during Phase 2–5 will be appended as a new top-level section here,
+not written separately, so the client gets a single page of
+constraints at handoff.

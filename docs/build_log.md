@@ -6,6 +6,120 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-11 — Phase 2 housekeeping (CI iterative migrations + GI-613 capture)
+
+**CI workflow fix (commit `ff85470`)**
+- `.github/workflows/ci.yml` schema job now iterates
+  `supabase/migrations/*.sql` in lexical order (= chronological order
+  per the supabase CLI's `YYYYMMDDHHMMSS_<name>.sql` naming). New
+  migrations are picked up automatically without a workflow edit.
+- Source-slug assertion replaced with an exact-set check on the 13
+  currently seeded slugs (alphabetically sorted, compared verbatim).
+  Stricter than a "13 or more" floor — catches both removals and
+  unintended additions.
+- New step validates `source_signature.last_modified` is a nullable
+  TEXT column (proves the schema migration applied).
+- Idempotency check re-runs only `*seed*.sql` files (the seed
+  migrations use ON CONFLICT DO UPDATE; schema-altering migrations
+  are correctly excluded from the second-apply pass).
+- CI green on the change.
+
+**TCEQ GI-613 capture (Phase 3 pre-staging)**
+
+Pre-fetched and decoded TCEQ publication GI-613 *"Description of
+Fields in Municipal Solid Waste Data Files"* so the Phase 3 canonical
+resolution step has the type-code → facility-category decoder ready
+on Day 5 without a discovery detour. The publication is the canonical
+TCEQ schema reference for `msw-facilities-texas.xls` (and the closed
++ revoked variants).
+
+- **URL:** https://www.tceq.texas.gov/downloads/permitting/waste-permits/publications/gi-613-description-of-fields-msw-data-files.pdf
+- **Issuance date:** May 2024 (per the PDF footer; Last-Modified
+  HTTP header is 2024-05-20).
+- **Size:** 188 KB, 4 pages.
+- **License:** Per the GI-613 footer (PDF page 1) — *"We authorize
+  you to use or reproduce any original material contained in this
+  publication — that is, any material we did not obtain from other
+  sources. Please acknowledge TCEQ as your source."* License-permissive
+  for our use and for downstream client (Arch Legacy Partners)
+  re-distribution as long as TCEQ is acknowledged.
+- **Local copy:** `local/tceq_audit/gi-613-description-of-fields-msw-data-files.pdf`
+  (gitignored). Decoded text at `local/tceq_audit/gi-613.txt` for grep
+  / Phase 3 reference. PDF is not committed; the URL is the canonical
+  citation and the local copy is forensic insurance against TCEQ
+  reorganizing their downloads tree before Day 5.
+
+### TCEQ Physical Type → v1 canonical-category mapping (from GI-613)
+
+Authorization number ranges define the regulatory regime (Permit /
+Registration / Notice of Intent / Permit by Rule), then the alpha
+suffix identifies the facility kind. Phase 3 resolver uses both the
+`Additional ID` numeric range AND the `Physical Type` code together.
+
+| Physical Type code | Description (per GI-613) | Auth # range(s) | Our category |
+|---|---|---|---|
+| `5RC` | Composting Facility (Permitted / Registered / NOI) | 1–8999 / 42000–42999 / 47000–47999 | **5 — Composting** |
+| `5RCX` | NOI to Operate a Recycling Facility — Composting | 100000+ | **5 — Composting** (with NOI confidence flag) |
+| `9GR` | Registered Beneficial Gas Recovery Facility | 48000–49999 | **6 — Anaerobic Digester** (partial — MSW-classified ADs only) |
+| `5TS` | Solid Waste Transfer Station (Permitted / Registered) | 1–8999 / 40000–41999 | **7 — Transfer Station** |
+| `5LV` | NOI Low-Volume Transfer Station | 110000+ | **7 — Transfer Station** (NOI flag) |
+| `5CC` | NOI Citizens Collection Station | 120000+ | **7 — Transfer Station** (small / municipal subtype) |
+| `5GG` | Liquid Waste Processing Facility | 1–8999 / 43000–43999 | **4 — Private/Regional Septage** (where wastestream qualifies) |
+| `5TL` | Liquid Waste Transfer Station | 40000–41999 | **4 — Private/Regional Septage** (transfer subtype) |
+| `5GM` | Registered Mobile Liquid Waste Processor | 61000–61999 | **4 — Private/Regional Septage** (mobile operator) |
+| `1`, `1AE`, `2`, `3`, `4`, `4AE` | Landfill facilities (Subtitle D + arid-exempt) | 1–8999 | **Not in v1 scope** — out of seven categories |
+| `5AC`, `5MW`, `5WI` | Medical Waste Processing | 1–8999 / 40000–41999 | **Not in v1 scope** — out of seven categories |
+| `9MR` | Material Recovery from Landfill | 40000–41999 | **Not in v1 scope** |
+| `CP`, `CR`, `SUBT` | Construction Over Closed MSW Landfills | 62000+ | **Not in v1 scope** — not operational facilities |
+| `5RR` | NOI to Operate a Recycling Facility | 100000+ | **Not in v1 scope** — pure recycling, not waste handling |
+
+**Coverage breakdown** (from the 1,494 inserted rows of the
+2026-05-11 load, top Physical Types):
+
+| Code | Rows | Category | Status note |
+|---|---:|---|---|
+| 5RR | 320 | Not in scope | Pure recycling NOIs |
+| 5CC | 193 | 7 (Transfer Station, small) | NOI Citizens Collection Stations |
+| 5TS | 157 | **7 — Transfer Station** | The high-confidence transfer-station rows |
+| SUBT | 155 | Not in scope | Construction over closed landfills (NOT CONSTRUCTED) |
+| 1 | 118 | Not in scope | Type-1 landfills |
+| 5RCX | 96 | **5 — Composting** (NOI) | NOI Recycling-Composting |
+| 5RC | 76 | **5 — Composting** | Composting Facility |
+| 9GR | 45 | **6 — Anaerobic Digester** | Beneficial Gas Recovery — strong category-6 candidates |
+| 5GG | 44 | **4 — Private Septage** (partial) | Liquid Waste Processing |
+| 5LV | 38 | **7 — Transfer Station** (NOI) | Low-Volume Transfer |
+| CP | 37 | Not in scope | Construction over closed landfills |
+| 1 AE & 4 AE | 33 | Not in scope | Type-1 + Type-4 arid-exempt landfills |
+| 4 | 28 | Not in scope | Type-4 landfill |
+| 4AE | 26 | Not in scope | Type-4 arid-exempt |
+| 1AE | 25 | Not in scope | Type-1 arid-exempt |
+
+So of the 1,494 rows, **rough Phase-3 v1 category yield estimates:**
+
+- Category 5 (Composting): ~172 (5RC + 5RCX)
+- Category 6 (Anaerobic Digester / Biogas Recovery): ~45 (9GR)
+- Category 7 (Transfer Stations): ~388 (5TS + 5LV + 5CC)
+- Category 4 (Private Septage — partial, liquid waste subset): ~44 (5GG)
+  plus 5TL + 5GM if present (need a re-count after Phase 3 codes)
+
+Roughly **649 v1-category-relevant rows** (~43% of the 1,494) survive
+the type filter. The rest are landfills, medical waste, pure
+recycling, or construction-over-closed-landfill (not relevant to the
+seven facility categories).
+
+This is honest. The MSW XLS isn't perfectly aligned with our category
+boundaries; ~57% of its rows are facility types we don't care about
+in v1. The 43% that survive is still meaningful state-level coverage
+for categories 5 and 7, plus the only public-list contribution to
+category 6 we'll get from TCEQ.
+
+Phase 3 will implement the actual mapping using these rules. The
+GI-613 PDF and the decoded text file are the references; future
+maintainers adding states can use them to disambiguate borderline
+codes (e.g. `5GG` overlap between septage and grease trap waste).
+
+---
+
 ## 2026-05-11 — Phase 2 step 1 (TCEQ MSW XLS loader)
 
 **Completed**
