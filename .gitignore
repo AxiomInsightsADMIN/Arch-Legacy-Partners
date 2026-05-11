@@ -1,36 +1,54 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Environments
+.venv/
+venv/
+env/
+.python-version
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# local env files
-.env*.local
+# Secrets — never commit
 .env
+.env.*
+!.env.example
 
-# vercel
-.vercel
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
 
-# typescript
-*.tsbuildinfo
-next-env.d.ts
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# CSV exports (large, regenerable; do not commit by default)
+exports/*.csv
+exports/*.csv.gz
+exports/*.parquet
+!exports/.gitkeep
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Playwright artifacts
+playwright-report/
+test-results/
+.playwright/
+
+# Scratch / local-only
+*.log
+tmp/
+scratch/
+local/
+
+# Claude Code session metadata (per-checkout, machine-local)
+.claude/

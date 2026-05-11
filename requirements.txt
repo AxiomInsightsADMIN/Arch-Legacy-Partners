@@ -1,0 +1,28 @@
+# Arch Legacy Partners — Wastewater Facility Database
+# Python 3.11 — major-version pinned only (per kickoff brief, do not freeze yet)
+
+# Scraping
+playwright>=1.49,<2
+beautifulsoup4>=4.12,<5
+pdfplumber>=0.11,<1
+requests>=2.32,<3
+
+# Entity resolution
+rapidfuzz>=3.10,<4
+
+# Database
+psycopg2-binary>=2.9,<3
+supabase>=2.10,<3
+
+# LLM
+anthropic>=0.40,<1
+
+# Config / utilities
+pyyaml>=6.0,<7
+python-dotenv>=1.0,<2
+pandas>=2.2,<3
+tqdm>=4.66,<5
+
+# Dev tooling
+pytest>=8.3,<9
+ruff>=0.8,<1

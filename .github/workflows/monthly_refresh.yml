@@ -1,0 +1,57 @@
+name: Monthly Refresh
+
+# Runs on the 1st of each month at 09:00 UTC (04:00 US/Central, 04:00 US/Eastern
+# winter — a sensible quiet hour for both client and operator). Also manually
+# triggerable for ad-hoc refresh testing.
+#
+# This file is a STUB. Phase 5 (Days 10-11) wires in:
+#   - per-source loaders (federal, TX, NC, counties, discovery)
+#   - entity resolver run
+#   - LLM enrichment pass (budget-capped)
+#   - CSV export to facilities_primary.csv + facilities_provenance.csv
+#   - source-drift detection + alerting to ALERT_EMAIL
+# The schedule and the secrets surface are registered here today so the cron
+# is live the moment Phase-5 code lands and the secrets get populated.
+
+on:
+  schedule:
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  refresh:
+    name: Monthly refresh (stub — Phase 5 implementation pending)
+    runs-on: ubuntu-latest
+    env:
+      # External-service secrets. Phase-5 jobs read these. The names match
+      # the .env.example schema at the project root.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+      SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+      SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+      SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+
+    steps:
+      - name: Placeholder — Phase 5 will replace this step
+        run: |
+          echo "Monthly refresh stub. Workflow exists so the cron schedule"
+          echo "(0 9 1 * *) is registered with GitHub now. Phase 5 (Days 10-11)"
+          echo "replaces this step with the real load + resolve + enrich + export"
+          echo "pipeline."
+          echo ""
+          echo "Secrets presence (boolean — no values printed):"
+          test -n "${ANTHROPIC_API_KEY:-}"            && echo "  ANTHROPIC_API_KEY     : set" || echo "  ANTHROPIC_API_KEY     : UNSET"
+          test -n "${BRAVE_API_KEY:-}"                && echo "  BRAVE_API_KEY         : set" || echo "  BRAVE_API_KEY         : UNSET"
+          test -n "${SUPABASE_URL:-}"                 && echo "  SUPABASE_URL          : set" || echo "  SUPABASE_URL          : UNSET"
+          test -n "${SUPABASE_SERVICE_ROLE_KEY:-}"    && echo "  SUPABASE_SERVICE_ROLE : set" || echo "  SUPABASE_SERVICE_ROLE : UNSET"
+          test -n "${ALERT_EMAIL:-}"                  && echo "  ALERT_EMAIL           : set" || echo "  ALERT_EMAIL           : UNSET"

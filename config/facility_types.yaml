@@ -1,0 +1,281 @@
+# =============================================================================
+# facility_types.yaml
+# Arch Legacy Partners — Wastewater Facility Database
+#
+# Controlled vocabulary mapping raw type strings (from source documents) onto
+# the seven canonical facility categories. Loaders MUST normalize through this
+# file — inline normalization in scrapers is a violation of the locked
+# architectural decision (section 8.9 of the kickoff brief).
+#
+# Mirrored into the database via `facility_type_lookup` (see 0001_initial.sql).
+#
+# Schema:
+#   types:
+#     <canonical_type_slug>:
+#       label:        human-readable name used in CSV exports
+#       description:  one-line definition for the data dictionary
+#       synonyms:     exact match (case-insensitive) — list of strings
+#       regex_rules:  regex match (case-insensitive) — list of Python re patterns
+#       not_synonyms: deny-list to disambiguate (e.g. "transfer station" is NOT
+#                     a "land application site" even if both keywords appear)
+#
+# Match precedence at load time:
+#   1) regex_rules (most specific wins; if multiple match, first listed wins
+#      and the loader logs a normalization_ambiguity warning)
+#   2) synonyms (exact, case-insensitive)
+#   3) not_synonyms hits demote the candidate match to "unknown"
+#
+# Conservative defaults: when in doubt, raw type stays as a synonym candidate;
+# anything not matched falls back to canonical_type=unknown with confidence=low
+# at the field_provenance layer. Do not invent matches.
+# =============================================================================
+
+version: "0.1.0"
+last_updated: "2026-05-11"
+authored_by: "Axiom Insights"
+
+types:
+
+  # ---------------------------------------------------------------------------
+  # SYNONYM SCOPE NOTE (Checkpoint-2 decision A3.3):
+  # Synonyms here are *receiving-station-specific*. Bare facility-type strings
+  # like "WWTP", "POTW", "wastewater treatment plant", or "treatment works"
+  # are deliberately EXCLUDED from this synonym list. Reason: only the subset
+  # of POTWs that operate a manifested-load hauler receiving station belong
+  # to category 1. Treating "WWTP" alone as a synonym would over-match every
+  # wastewater plant and inflate category 1 with non-receiving facilities.
+  # The acceptance-flag enrichment in Phase 4 promotes a bare POTW to this
+  # canonical type only when an acceptance signal (accepts_septage='Yes', a
+  # hauler manifest reference, etc.) is found. Unmatched raw types fall back
+  # to canonical_type='unknown' with confidence='low' at field_provenance.
+  # ---------------------------------------------------------------------------
+  potw_receiving_station:
+    label: "POTW Receiving Station"
+    description: >
+      Publicly Owned Treatment Works that operate a dedicated hauler/septage
+      receiving station, typically a manifested-load offload point connected
+      to headworks. Distinct from a POTW that does not accept hauled waste.
+    synonyms:
+      - "POTW receiving station"
+      - "POTW septage receiving station"
+      - "publicly owned treatment works receiving station"
+      - "wastewater treatment plant receiving station"
+      - "WWTP receiving station"
+      - "WRP receiving station"
+      - "water reclamation plant receiving station"
+      - "municipal hauler receiving station"
+      - "septage receiving facility (POTW)"
+      - "headworks receiving station"
+      - "publicly owned treatment works (hauler receiving)"
+    regex_rules:
+      - "(?i)\\bPOTW\\b.*\\breceiv(ing|er)\\b"
+      - "(?i)\\b(WWTP|WRP)\\b.*\\b(septage|hauler)\\b.*\\breceiv"
+      - "(?i)\\bmunicipal\\b.*\\bseptage receiv"
+      - "(?i)\\bheadworks\\b.*\\b(receiv|offload)"
+    not_synonyms:
+      - "land application"
+      - "private septage facility"
+      - "composting"
+      - "anaerobic digester"
+      - "transfer station"
+      - "manhole disposal"
+
+  # ---------------------------------------------------------------------------
+  county_manhole_program:
+    label: "County Manhole Program"
+    description: >
+      County or municipal program that authorizes haulers to discharge into
+      designated sanitary-sewer manholes (sometimes called "discharge manholes"
+      or "manhole disposal points"). Not a treatment plant; a permitted
+      discharge point upstream of one.
+    synonyms:
+      - "county manhole program"
+      - "manhole disposal program"
+      - "designated discharge manhole"
+      - "permitted manhole discharge"
+      - "sanitary sewer manhole disposal"
+      - "hauler manhole discharge program"
+      - "municipal manhole disposal program"
+      - "septage manhole discharge"
+    regex_rules:
+      - "(?i)\\bmanhole\\b.*\\b(discharg|disposal|dump|program)"
+      - "(?i)\\b(designated|permitted)\\b.*\\bmanhole\\b"
+      - "(?i)\\bhauler\\b.*\\bmanhole\\b"
+    not_synonyms:
+      - "headworks"
+      - "treatment plant"
+      - "transfer station"
+
+  # ---------------------------------------------------------------------------
+  land_application_site:
+    label: "Land Application Site"
+    description: >
+      Permitted site that receives biosolids or septage for surface application
+      or sub-surface injection onto cropland, forestland, pasture, or
+      reclamation land. Includes registered Class A and Class B biosolids
+      sites as well as septage land application under 40 CFR 503.
+    synonyms:
+      - "land application site"
+      - "biosolids land application site"
+      - "septage land application site"
+      - "registered land application"
+      - "Class A biosolids land application"
+      - "Class B biosolids land application"
+      - "surface application site"
+      - "sub-surface injection site"
+      - "permitted land application"
+      - "biosolids spreader site"
+      - "sludge land application"
+    regex_rules:
+      - "(?i)\\bland\\s*appl(y|ied|ication|icator)"
+      - "(?i)\\b(biosolids|sludge|septage)\\b.*\\b(land|surface|subsurface)\\s*appl"
+      - "(?i)\\bclass\\s*[ab]\\b.*\\bbiosolids"
+      - "(?i)\\b40\\s*CFR\\s*503\\b"
+    not_synonyms:
+      - "transfer station"
+      - "composting facility"
+      - "anaerobic digester"
+      - "POTW"
+      - "treatment plant"
+
+  # ---------------------------------------------------------------------------
+  private_regional_septage_facility:
+    label: "Private / Regional Septage Facility"
+    description: >
+      Privately or regionally operated facility that accepts septage, grease
+      trap waste, or portable toilet waste from haulers for treatment,
+      dewatering, or transfer. Distinct from a POTW receiving station
+      (which is publicly owned) and from a transfer station (which moves
+      waste rather than treating it).
+    synonyms:
+      - "private septage facility"
+      - "regional septage facility"
+      - "commercial septage receiving facility"
+      - "private hauler waste facility"
+      - "septage treatment facility (private)"
+      - "grease trap waste facility"
+      - "FOG receiving facility"
+      - "fats, oils, and grease (FOG) facility"
+      - "portable toilet waste facility"
+      - "porta-potty waste facility"
+      - "regional biosolids handling facility"
+    regex_rules:
+      - "(?i)\\b(private|commercial|regional)\\b.*\\b(septage|FOG|grease|portable\\s*toilet)"
+      - "(?i)\\b(septage|grease|FOG)\\b.*\\b(receiving|handling|treatment)\\b.*\\bfacility"
+      - "(?i)\\bporta(-|\\s*)pott(y|ies)\\b.*\\b(waste|disposal|facility)"
+    not_synonyms:
+      - "POTW"
+      - "publicly owned"
+      - "land application"
+      - "composting"
+      - "anaerobic digester"
+      - "manhole"
+
+  # ---------------------------------------------------------------------------
+  composting_facility:
+    label: "Composting Facility"
+    description: >
+      Permitted facility that composts biosolids, food waste, yard waste, or
+      mixed organics. Includes Type 1-5 compost facilities under NC DWM
+      classifications and equivalent TCEQ permits. Excludes pure transfer
+      stations and pure anaerobic digesters.
+    synonyms:
+      - "composting facility"
+      - "compost facility"
+      - "biosolids composting facility"
+      - "yard waste composting facility"
+      - "food waste composting facility"
+      - "mixed organics composting facility"
+      - "Type 1 compost facility"
+      - "Type 2 compost facility"
+      - "Type 3 compost facility"
+      - "Type 4 compost facility"
+      - "Type 5 compost facility"
+      - "permitted compost site"
+      - "registered compost operation"
+    regex_rules:
+      - "(?i)\\bcompost(ing)?\\b.*\\b(facility|site|operation)"
+      - "(?i)\\btype\\s*[1-5]\\b.*\\bcompost"
+    not_synonyms:
+      - "anaerobic digester"
+      - "transfer station"
+      - "land application"
+
+  # ---------------------------------------------------------------------------
+  anaerobic_digester:
+    label: "Anaerobic Digester"
+    description: >
+      Facility operating an anaerobic digester for biosolids, food waste,
+      manure, or co-digestion. Includes standalone digesters and POTW
+      digesters that are inventoried as separate units. Excludes pure
+      composting facilities.
+    synonyms:
+      - "anaerobic digester"
+      - "anaerobic digestion facility"
+      - "biogas facility"
+      - "biogas plant"
+      - "digester"
+      - "co-digestion facility"
+      - "mesophilic digester"
+      - "thermophilic digester"
+      - "RNG production facility"
+      - "renewable natural gas facility"
+    regex_rules:
+      - "(?i)\\banaerobic\\s*digest(er|ion)"
+      - "(?i)\\bbiogas\\b.*\\b(facility|plant)"
+      - "(?i)\\bco-?digestion\\b"
+      - "(?i)\\brenewable\\s*natural\\s*gas\\b"
+    not_synonyms:
+      - "composting"
+      - "transfer station"
+      - "land application"
+
+  # ---------------------------------------------------------------------------
+  transfer_station:
+    label: "Transfer Station"
+    description: >
+      Permitted solid-waste or septage transfer station — a facility where
+      collected waste is consolidated for onward transport rather than
+      treated on-site. Includes TCEQ Type V transfer stations and NC DWM
+      transfer-station permits.
+    synonyms:
+      - "transfer station"
+      - "solid waste transfer station"
+      - "septage transfer station"
+      - "permitted transfer station"
+      - "Type V transfer station"
+      - "municipal solid waste transfer station"
+      - "MSW transfer station"
+      - "waste consolidation transfer station"
+    regex_rules:
+      - "(?i)\\btransfer\\s*station\\b"
+      - "(?i)\\btype\\s*v\\b.*\\btransfer"
+      - "(?i)\\bMSW\\b.*\\btransfer\\s*station"
+    not_synonyms:
+      - "land application"
+      - "composting"
+      - "anaerobic digester"
+      - "POTW"
+      - "manhole"
+      # Drinking-water exclusions (Checkpoint-2 decision A3.6) — prevent the
+      # transfer-station regex from over-matching drinking-water infrastructure
+      # that happens to contain the word "transfer" or "water transfer."
+      - "water transfer station"
+      - "drinking water"
+      - "raw water transfer"
+      - "treated water transfer"
+      - "potable water"
+
+# =============================================================================
+# Notes for future maintainers
+# =============================================================================
+#
+# - Adding synonyms: prefer exact-match strings over regex; reserve regex for
+#   patterns that genuinely have variants (e.g. "land applic*").
+# - Adding a new canonical type requires a coordinated migration: add to this
+#   file, add a `facility_type_lookup` insert in a new numbered migration, and
+#   update the data dictionary. The seven types here are the locked v1 scope.
+# - "unknown" is a valid canonical_type when nothing here matches. Loaders
+#   should write the raw type as the value at field_provenance.field_name =
+#   "facility_type_raw" so the original string is preserved for re-pass.
+# =============================================================================
