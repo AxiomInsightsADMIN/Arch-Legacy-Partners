@@ -6,6 +6,142 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 2 step 3 (NC DEQ Solid Waste loader via manual-drop XLSX)
+
+**Completed**
+- `requirements.txt` adds `openpyxl>=3.1.0,<4` for `.xlsx` parsing.
+  The pre-existing `xlrd>=2.0.1` is only for old BIFF `.xls`
+  (TCEQ MSW). Different file format → different engine. Both are
+  installed in the venv (xlrd 2.0.2 + openpyxl 3.1.5).
+- **Playwright probe blocked.** A real-Chromium headless probe of
+  `edocs.deq.nc.gov` returned `net::ERR_CONNECTION_TIMED_OUT` on the
+  first attempt and `net::ERR_NETWORK_CHANGED` on the second
+  (same network-layer block; the WAF doesn't care about TLS or UA
+  fingerprint). Per the locked operational rule we did **not**
+  attempt anti-detection escalation, IP rotation, or proxy use.
+  Surfaced to Ryan; manual drop received.
+- **Manual drop received** at
+  `local/manual_drops/nc_deq_solid_waste/nc_deq_solid_waste_2026-05-11.xlsx`
+  (66,614 bytes; XLSX modern format, not legacy BIFF). Originally
+  expected as CSV per audit; Ryan verified the actual format is
+  Microsoft Excel Worksheet `.xlsx`.
+- **Manual column inspection.** Two sheets: "About" (40-row
+  metadata, with `Date Created: April 28, 2026` in the header) and
+  "Active Solid Waste Facilities" (435 facility rows × 13 columns:
+  `County`, `Facility Id`, `Facility Name`, `Waste`, `Activity`,
+  `Latitude`, `Longitude`, `Address`, `City`, `State`, `Zip`,
+  `Contact`, `Phone`). Stable identifier confirmed: `Facility Id`,
+  100% populated and 100% unique across all 435 rows. Format:
+  `<county-prefix>-<facility-type-code>-<year-or-suffix>` (e.g.
+  `0104-MSWLF-1994`, `0109-COMPOST-2025`, `0102-INCIN-M-`). Unlike
+  the DWR Non-Discharge view, NC DEQ DWM publishes `Latitude` and
+  `Longitude` on this list (425/435 rows have both = 97.7%
+  coverage).
+- **Built `scrapers/state/nc_deq_solid_waste.py`** with two
+  fetch paths in priority order: Playwright (kept for forward-compat
+  in case NC DEQ ever relaxes the WAF rule) → manual-drop pickup of
+  the newest `.xlsx` in
+  `local/manual_drops/nc_deq_solid_waste/`. Same shared loader
+  utilities (`_loader_utils.py`) as the federal + TCEQ loaders.
+  Content-date from the About-sheet header is parsed via regex into
+  a RFC 7231 string for `source_signature.last_modified` —
+  consistent with the column shape used by every other loader so the
+  drift detector can compare across sources.
+- **Loader run completed.** Manual-drop path used (Playwright
+  failed as expected). 435 parsed → 435 inserted → 0 updated → 0
+  unchanged → 0 dupes → 0 skipped no-id → 0 cross-state. 10 rows
+  with null `Latitude` or `Longitude` (2.3%). 8.9 s elapsed.
+  `scraper_run id=8 status=success`. `source_signature` for run 8:
+  `http=NULL` (manual_drop path), `bytes=66,614`,
+  `schema_hash=26a6dab77852…`, `row_count=435`,
+  `last_modified='Tue, 28 Apr 2026 00:00:00 GMT'`.
+
+**Activity / Waste distribution in this load**
+
+Activity column (8 distinct values):
+
+| Activity | Rows | v1 category |
+|---|---:|---|
+| LF | 175 | Not in 7 (landfill) |
+| **Trans** | **92** | **7 — Transfer Station** |
+| **Compost** | **63** | **5 — Composting** |
+| TP | 52 | Mostly LCID/CD/YW/Tire/Med treatment-and-processing — not septage; not in 7 |
+| Collection | 30 | Citizen drop-off (HHW); arguably 7-subtype, but not the canonical transfer-station definition |
+| LF* | 15 | Landfill variant — not in 7 |
+| MatRecovery | 7 | Material recovery — not in 7 |
+| Incin | 1 | Incinerator — not in 7 |
+
+Waste column (14 distinct values) — informational decoder:
+
+```
+MSW=124  LCID=103  CD=75  Type I=33  HHW=28  Type III=25  Tire=10
+YW=9     CCR=9     Indus=7  Medical=4  Type II=3  Type IV=3  MatRecovery=2
+```
+
+Phase-3-relevant subset: **155 rows** (92 Trans + 63 Compost) are
+direct v1-category hits. The "Collection" 30 may add to category 7
+as a subtype (NC's HHW collection stations are conceptually similar
+to TCEQ's `5CC` Citizens Collection Stations) — Phase 3 resolver
+decides.
+
+**No category 4 (private septage) or category 6 (anaerobic
+digester) coverage in this list.** NC handles septage in a separate
+roster (docid 2132702 = step 4) and AD facilities are spread across
+sources — neither falls inside the SW Permitted Facilities list.
+
+**Cross-state sanity**: 435/435 rows are `State='NC'`. Zero
+cross-state.
+
+**Cumulative `raw_facility_record` after this load**
+
+```
+epa_echo                            92,326
+epa_cwns_2022                        3,132
+tceq_msw_facilities_xls              1,494
+nc_deq_non_discharge_facilities      1,259
+nc_deq_solid_waste_facility_list       435
+─────────────────────────────────  ──────────
+TOTAL                               98,646
+```
+
+**Decisions made**
+
+- **`tos_url` updated already.** The seed migration set
+  `tceq_msw_facilities_xls` → TCEQ Website Policies index. NC's
+  scope-limitations are now in `docs/v1_scope_limitations.md` per
+  the Phase 2 step 2 prep. Nothing to add for step 3.
+- **`source_signature.http_status = NULL` on the manual-drop path.**
+  We didn't issue an HTTP request that returned a status; the bytes
+  came from disk. The byte count is recorded as a fallback cadence
+  signal, and `last_modified` carries the upstream content-date
+  ("Tue, 28 Apr 2026"). The next monthly run will compare against
+  this baseline whether it lands via Playwright (succeeds) or
+  manual-drop (succeeds against a newer drop).
+- **Playwright fetch path kept in code even though it's expected to
+  fail.** Forward-compat: if NC DEQ ever relaxes the WAF rule, our
+  loader silently transitions to automated fetch with no code
+  change. Today the path consistently produces a `pw failed`
+  log line and the manual-drop path takes over. Captured in the
+  loader's docstring.
+
+**Anomalies / non-issues**
+
+- **None blocking.** The Playwright failure is the documented v1
+  scope concession; the manual-drop workflow is the operational
+  primary today.
+
+**Deviations from the brief**
+
+- File format correction: the audit doc anticipated PDF format for
+  these documents; both edocs documents are actually XLSX (verified
+  by Ryan from File Properties). The audit doc's wording around
+  "PDF" remains historically accurate of what the audit *predicted*;
+  the actual delivered format is XLSX, which the loader handles via
+  openpyxl. The Phase 2 step 4 entry will note the same correction
+  when that loader ships.
+
+---
+
 ## 2026-05-12 — Phase 3 prep: ID-first match rules
 
 Phase 3 (Days 5–6) entity resolution will use **ID-first matching** that
