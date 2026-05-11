@@ -146,45 +146,61 @@ jobs:
         run: |
           psql -v ON_ERROR_STOP=1 -c "SELECT name FROM pg_available_extensions WHERE name IN ('pgcrypto','citext') ORDER BY name;"
 
-      - name: Apply 0001_initial.sql
+      # ------------------------------------------------------------------
+      # Apply every migration in lexical order. The supabase CLI uses
+      # YYYYMMDDHHMMSS_<name>.sql naming so lexical sort = chronological
+      # order = correct dependency order. Adding a new migration to the
+      # tree automatically gets it picked up by this step without an
+      # edit to the workflow.
+      # ------------------------------------------------------------------
+      - name: Apply all supabase/migrations/*.sql in lexical order
         run: |
-          psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260511203500_initial.sql
+          set -euo pipefail
+          shopt -s nullglob
+          files=(supabase/migrations/*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "FAIL: no migrations found in supabase/migrations/"
+            exit 1
+          fi
+          # Bash glob expansion is already lexical-sorted on Linux
+          for f in "${files[@]}"; do
+            echo "→ applying $f"
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+          echo "applied ${#files[@]} migrations"
 
       - name: Inspect tables created (sanity)
         run: |
           psql -v ON_ERROR_STOP=1 -c "\dt"
           psql -v ON_ERROR_STOP=1 -tA -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname='public';"
 
-      - name: Apply 0002_source_seed.sql
+      # ------------------------------------------------------------------
+      # Source-table assertions are pinned to the *exact* slug set the
+      # current migrations produce. When a new source row ships, the
+      # migration adds it AND this step's `expected` list is updated in
+      # the same commit. The exact-match check is stricter than a
+      # "13 or more" floor and surfaces unintended additions or removals
+      # as a CI failure.
+      # ------------------------------------------------------------------
+      - name: Verify source slug set matches the expected 13
         run: |
-          psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260511203501_source_seed.sql
-
-      - name: Verify source table has exactly 12 rows
-        run: |
+          expected="county_health_placeholder discovery_crawl epa_cwns_2022 epa_echo nc_deq_dwm nc_deq_dwr operator_sites_placeholder state_npdes state_registries_placeholder tceq_central_registry tceq_domestic_wastewater tceq_msw_facilities_xls tceq_public_data_lookup"
+          # Total count
           count=$(psql -tA -c "SELECT COUNT(*) FROM source;")
           echo "source row count: $count"
-          if [ "$count" != "12" ]; then
-            echo "FAIL: expected 12 source rows after seed, got $count"
-            psql -c "SELECT slug, type, robots_txt_status FROM source ORDER BY id;"
+          # Actual slug set (sorted, space-separated)
+          actual=$(psql -tA -c "SELECT slug FROM source ORDER BY slug;" | tr '\n' ' ' | sed 's/ $//')
+          # Normalize expected to space-separated single-line for comparison
+          expected_norm=$(echo "$expected" | tr -s ' ')
+          actual_norm=$(echo "$actual" | tr -s ' ')
+          if [ "$expected_norm" != "$actual_norm" ]; then
+            echo "FAIL: slug set mismatch"
+            echo "  expected: $expected_norm"
+            echo "  actual  : $actual_norm"
+            psql -c "SELECT slug, type, robots_txt_status FROM source ORDER BY slug;"
             exit 1
           fi
-          echo "PASS: source has 12 rows."
-
-      - name: Verify expected slugs are all present
-        run: |
-          expected="epa_echo epa_cwns_2022 state_npdes tceq_central_registry tceq_public_data_lookup tceq_domestic_wastewater nc_deq_dwr nc_deq_dwm county_health_placeholder state_registries_placeholder operator_sites_placeholder discovery_crawl"
-          missing=""
-          for slug in $expected; do
-            found=$(psql -tA -c "SELECT COUNT(*) FROM source WHERE slug='$slug';")
-            if [ "$found" != "1" ]; then
-              missing="$missing $slug"
-            fi
-          done
-          if [ -n "$missing" ]; then
-            echo "FAIL: missing slugs:$missing"
-            exit 1
-          fi
-          echo "PASS: all 12 expected slugs present."
+          echo "PASS: source has 13 rows with the expected slug set."
 
       - name: Verify tceq_central_registry is robots-disallowed
         run: |
@@ -196,12 +212,43 @@ jobs:
           fi
           echo "PASS: TCEQ CRPUB robots-disallow flag persisted."
 
-      - name: Idempotency check — re-apply seed (ON CONFLICT DO UPDATE)
+      # ------------------------------------------------------------------
+      # Validate that the source_signature.last_modified column exists
+      # (added by 20260511221000_add_last_modified_to_source_signature.sql).
+      # Cheap insurance that schema-altering migrations actually applied.
+      # ------------------------------------------------------------------
+      - name: Verify source_signature.last_modified column exists
         run: |
-          psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260511203501_source_seed.sql
-          count=$(psql -tA -c "SELECT COUNT(*) FROM source;")
-          if [ "$count" != "12" ]; then
-            echo "FAIL: re-apply changed row count to $count (expected 12)"
+          shape=$(psql -tA -c "SELECT is_nullable || '/' || data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='source_signature' AND column_name='last_modified';")
+          echo "source_signature.last_modified shape: $shape"
+          if [ "$shape" != "YES/text" ]; then
+            echo "FAIL: expected 'YES/text' (nullable TEXT), got '$shape'"
             exit 1
           fi
-          echo "PASS: seed is idempotent."
+          echo "PASS: last_modified column is nullable TEXT."
+
+      # ------------------------------------------------------------------
+      # Idempotency: re-apply every migration. Seed migrations use
+      # ON CONFLICT DO UPDATE so they're safe. Schema migrations use
+      # ADD COLUMN IF NOT EXISTS or otherwise no-op on second apply.
+      # The CREATE EXTENSION / CREATE TABLE statements in 0001 will
+      # fail on the second apply (they aren't IF NOT EXISTS for the
+      # tables); we only re-apply the seed migrations to validate
+      # their ON CONFLICT logic.
+      # ------------------------------------------------------------------
+      - name: Idempotency check — re-apply seed migrations
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Heuristic: any file with "seed" in its basename re-applies safely
+          # via ON CONFLICT. Schema-altering migrations are not re-applied.
+          for f in supabase/migrations/*seed*.sql; do
+            echo "→ re-applying $f"
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+          count=$(psql -tA -c "SELECT COUNT(*) FROM source;")
+          if [ "$count" != "13" ]; then
+            echo "FAIL: re-apply changed source row count to $count (expected 13)"
+            exit 1
+          fi
+          echo "PASS: seed migrations are idempotent."
