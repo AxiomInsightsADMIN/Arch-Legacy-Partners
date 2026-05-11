@@ -23,7 +23,6 @@ scraper_run, source_signature — all per the locked architectural decisions.
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 import os
@@ -35,10 +34,23 @@ from pathlib import Path
 import psycopg2
 import psycopg2.extras
 import requests
-from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-load_dotenv(ROOT / ".env")
+# Make the project root importable when this module is run directly. See
+# the parallel note in epa_cwns.py for why.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from scrapers._loader_utils import (  # noqa: E402
+    begin_run,
+    db_connect,
+    finish_run,
+    get_source_id,
+    hash_payload,
+    write_signature,
+)
+
+ROOT = _PROJECT_ROOT
 
 USER_AGENT = (
     "Axiom-Insights-ArchLegacy/0.1 (Phase-1 EPA ECHO loader; "
@@ -78,84 +90,6 @@ class StateLoadResult:
 
 
 # --------------------------------------------------------------------------
-# DB helpers
-# --------------------------------------------------------------------------
-def db_connect() -> psycopg2.extensions.connection:
-    return psycopg2.connect(
-        host=os.environ["SUPABASE_DB_HOST"],
-        port=int(os.environ["SUPABASE_DB_PORT"]),
-        user=os.environ["SUPABASE_DB_USER"],
-        password=os.environ["SUPABASE_DB_PASSWORD"],
-        dbname=os.environ["SUPABASE_DB_NAME"],
-        sslmode="require",
-        connect_timeout=15,
-    )
-
-
-def get_source_id(cur, slug: str) -> int:
-    cur.execute("SELECT id FROM source WHERE slug = %s", (slug,))
-    row = cur.fetchone()
-    if not row:
-        raise RuntimeError(f"source slug {slug!r} not found — seed migration not applied?")
-    return row[0]
-
-
-def begin_run(cur, source_id: int) -> int:
-    cur.execute(
-        "INSERT INTO scraper_run (source_id, status) VALUES (%s, 'running') RETURNING id",
-        (source_id,),
-    )
-    return cur.fetchone()[0]
-
-
-def finish_run(
-    cur,
-    run_id: int,
-    status: str,
-    *,
-    rows_in,
-    rows_inserted,
-    rows_updated,
-    error_message: str | None = None,
-) -> None:
-    cur.execute(
-        """
-        UPDATE scraper_run
-           SET status = %s,
-               rows_in = %s,
-               rows_inserted = %s,
-               rows_updated = %s,
-               error_message = %s,
-               finished_at = NOW()
-         WHERE id = %s
-        """,
-        (status, rows_in, rows_inserted, rows_updated, error_message, run_id),
-    )
-
-
-def write_signature(
-    cur,
-    source_id: int,
-    run_id: int,
-    *,
-    http_status: int | None,
-    byte_size: int,
-    schema_hash: str | None,
-    row_count: int,
-    selectors_hit_count: int | None = None,
-) -> None:
-    cur.execute(
-        """
-        INSERT INTO source_signature
-            (source_id, scraper_run_id, http_status, response_byte_size,
-             schema_hash, row_count, selectors_hit_count)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """,
-        (source_id, run_id, http_status, byte_size, schema_hash, row_count, selectors_hit_count),
-    )
-
-
-# --------------------------------------------------------------------------
 # ECHO REST helpers
 # --------------------------------------------------------------------------
 def echo_setup(state: str) -> tuple[int, int, str]:
@@ -186,10 +120,6 @@ def echo_download(qid: str) -> tuple[int, str, int]:
 # --------------------------------------------------------------------------
 # Upsert helpers
 # --------------------------------------------------------------------------
-def _hash_payload(payload_str: str) -> str:
-    return hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
-
-
 def _source_record_id_for_row(row: dict) -> str | None:
     """Stable per-source key. ECHO rows: prefer SourceID (NPDES) → RegistryID
     (FRS) → bail. We need a stable, unique key per facility."""
@@ -255,7 +185,7 @@ def load_state(state: str) -> StateLoadResult:
     # 3) parse + 4) upsert
     reader = csv.DictReader(io.StringIO(csv_text))
     headers = reader.fieldnames or []
-    schema_hash = _hash_payload(",".join(headers))
+    schema_hash = hash_payload(",".join(headers))
     print(f"[{state}] parsed {len(headers)} columns; schema_hash={schema_hash[:12]}…", flush=True)
 
     conn = db_connect()
@@ -282,7 +212,7 @@ def load_state(state: str) -> StateLoadResult:
                 rows_skipped += 1
                 continue
             payload_str = json.dumps(row, ensure_ascii=False, sort_keys=True)
-            payload_hash = _hash_payload(payload_str)
+            payload_hash = hash_payload(payload_str)
             batch.append((source_id, src_rec_id, run_id, psycopg2.extras.Json(row), payload_hash))
             if len(batch) >= BATCH_SIZE:
                 ins, upd = _flush_batch(cur, batch)
