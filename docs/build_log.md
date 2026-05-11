@@ -6,6 +6,137 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 2 step 2 (NC DEQ Non-Discharge ArcGIS loader)
+
+**Completed**
+- Applied `supabase/migrations/20260511230000_nc_deq_subsource_seed.sql`
+  to Supabase. Source count is now 16 (verified live). The 3 new NC
+  slugs (`nc_deq_non_discharge_facilities`,
+  `nc_deq_solid_waste_facility_list`, `nc_deq_septage_firm_list`)
+  are present. CI's expected-set assertion at 16 was pre-staged in
+  commit `ab50335` so no workflow change was needed.
+- **Identified the right ArcGIS layer.** NC OneMap (137 services on
+  `services.nconemap.gov`) does **not** carry the Non-Discharge
+  facilities; the NC DEQ ArcGIS Online org at
+  `https://ncdenr.maps.arcgis.com` does. The DWR Locator Map
+  Experience (`689283d17bf342c2a96364fbab09a5d8`, owner
+  `DWR_GIS_Team`, title "DWR Locator Map (Public)") references a
+  Web Map item (`b200deee16ae417a931e10d96e9f2ac8`, "Regional
+  Office: All-in-One Map-withGroups-(Public)") that pulls from 44
+  FeatureServers / MapServers. The relevant ones for our seven
+  categories are:
+  - `NPDES_Non_Discharge_Permits_(View)/FeatureServer/0` — **our
+    primary target for this loader.** 1,259 features, schema
+    documented below.
+  - `Non_Discharge_Land_Application_Field_Permits_(View)/FeatureServer/0`
+    — sub-detail of the above (per-application-field rows). Not
+    loaded in this step; consider for Phase 5 if Phase 3 needs
+    field-level resolution.
+  - `NPDES_Wastewater_Discharge_Permits/FeatureServer/0` — NC's
+    NPDES wastewater discharge permits. Corroborates EPA ECHO's NC
+    POTW coverage. Not loaded in this step; ECHO is already the
+    primary path for category 1.
+- **Built and ran `scrapers/state/nc_deq_non_discharge.py`.** 1,259
+  features pulled, 1,259 rows inserted into `raw_facility_record`
+  with `source='nc_deq_non_discharge_facilities'`. Sequential
+  pagination via `resultOffset` / `resultRecordCount` (page size
+  1000). 2 pages total. 7.8 seconds elapsed. 765 KB total bytes.
+- `source_signature.last_modified` captured from the layer's
+  `editingInfo.dataLastEditDate` (Unix ms = 1778527699505 →
+  RFC 7231 = `Mon, 11 May 2026 19:28:19 GMT`). The data was edited
+  yesterday at ~19:28 UTC; the loader signals current freshness.
+
+**Schema verified (16 fields)**
+
+`PERMITNUMBER` (string, `WQ\d{7}` — the NC state permit ID; **stable
+identifier**), `PERMIT_TYPE`, `PERMIT_STATUS`,
+`ORIGINAL_ISSUED_DT`, `PERMIT_EFFECTIVE_DATE`,
+`PERMIT_EXPIRATION_DT`, `FACILITY`, `FACILITY_STATUS`, `OWNER`,
+`OWNER_TYPE`, `MAJOR` (smallInt), `COUNTY`, `REGION`,
+`LAST_INSPECTION_DT`, `URL` (deep-link to edocs), `ObjectId` (oid).
+Date fields are Unix ms; loader stores them as-is in `raw_payload`
+and Phase 3 converts at canonicalization.
+
+**Anomalies found**
+
+- **No geometry in any feature.** The public `(View)` deliberately
+  strips geometry from every row — 0/1000 features have a non-null
+  `geometry` object even though the layer type is `esriGeometryPoint`
+  and we requested `returnGeometry=true` + `outSR=4326`. This is
+  almost certainly a privacy decision by NC DEQ — 589 of the 1,259
+  rows (≈47%) are "Single-Family Residence Wastewater Irrigation"
+  permits where exposing exact lat/lng of homes would be PII.
+  Phase 3 canonical resolution will leave
+  `canonical_facility.latitude / longitude` NULL for every NC NDP
+  row and use `COUNTY` as the geographic attribution. Documented in
+  the loader docstring + the v1 scope limitations doc would benefit
+  from a small note (deferred — single-source detail, not a global
+  constraint).
+- **0 null PERMITNUMBERs, 0 in-XLS-style dupes.** The schema's
+  `PERMITNUMBER` column is fully populated and unique across all
+  1,259 rows.
+- **0 null counties.** Every row has a COUNTY value.
+- **NC DEQ confirmed within-state**: there is no state column on the
+  view; the layer is NC-only by source. Cross-state check
+  effectively N/A.
+
+**Category coverage in this load**
+
+| PERMIT_TYPE | Count | v1 category |
+|---|---:|---|
+| Single-Family Residence Wastewater Irrigation | 589 | Not in 7 (residential, not facility) |
+| Wastewater Irrigation | 215 | 3 (Land application, partial — non-residential irrigation) |
+| Reclaimed Water | 107 | 3 (corroboration) |
+| **Land Application of Residual Solids (503)** | **96** | **3 (Land application — primary)** |
+| High Rate Infiltration | 60 | 3 (corroboration) |
+| Distribution of Residual Solids (503) | 37 | 3 (residual handling) |
+| Closed-Loop Recycle | 36 | not in 7 (closed system) |
+| Distribution of Residual Solids (503 Exempt) | 36 | 3 (residual handling) |
+| Reclaimed Water Distribution | 25 | 3 (corroboration) |
+| **Land Application of Residual Solids (503 Exempt)** | **16** | **3 (Land application — primary)** |
+| Gravity Sewer, Pump Station, & Pressure Sewer Variance | 14 | not in 7 (collection infrastructure) |
+| Other Non-Discharge Wastewater | 11 | 3 (catch-all) |
+| Primary Residences Sharing a Common Sewer Line | 7 | not in 7 (residential) |
+| Surface Disposal of Residual Solids (503 Exempt) | 6 | 3 (residuals disposal) |
+| Surface Disposal of Residual Solids (503) | 4 | 3 (residuals disposal) |
+
+Phase-3-relevant subset: ~**517 rows** for category 3 (Land
+Application — direct + corroboration). Phase 3 will refine the
+exact mapping per type.
+
+**Status distribution:** 1,173 Active, 86 Expired. Phase 3 should
+filter on Active.
+
+**Cumulative `raw_facility_record` after this load**
+
+```
+epa_echo                          92,326
+epa_cwns_2022                      3,132
+tceq_msw_facilities_xls            1,494
+nc_deq_non_discharge_facilities    1,259
+─────────────────────────────── ──────────
+TOTAL                             98,211
+```
+
+**Decisions made**
+
+- **Geometry behavior is a deliberate NC DEQ privacy decision, not a
+  bug.** We don't fight it — the loader records what the View
+  exposes and Phase 3 handles NULL coords gracefully via the
+  geocoder module's state-consistency policy.
+- **`outSR=4326` left in the query** for forward-compat. If NC DEQ
+  ever flips the View to expose geometry, our requests pick it up
+  in WGS84 without a code change.
+- **`Non_Discharge_Land_Application_Field_Permits_(View)` not loaded
+  in this step.** It's per-field detail; Phase 3 can decide whether
+  to pull it. If we add it later it needs its own source slug.
+
+**Deviations from the brief**
+
+- None.
+
+---
+
 ## 2026-05-11 — Phase 2 housekeeping (CI iterative migrations + GI-613 capture)
 
 **CI workflow fix (commit `ff85470`)**
