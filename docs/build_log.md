@@ -6,6 +6,140 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 2 step 4 (NC DEQ Septage Firm loader via manual-drop XLSX)
+
+**Completed**
+- **Playwright probe blocked (third NC DEQ source in a row).** Same
+  `edocs.deq.nc.gov` repository (`docid=2132702` here vs `2132701`
+  for solid waste); same `net::ERR_CONNECTION_TIMED_OUT` failure
+  mode on the Playwright probe. The WAF rule continues to be
+  network-layer, not application-layer, so real-Chromium
+  fingerprinting doesn't help. Per the locked operational rule we
+  did **not** attempt anti-detection escalation. Manual-drop path
+  is the operational primary for this NC DEQ DWM source family
+  today.
+- **Manual drop received** at
+  `local/manual_drops/nc_deq_septage_firm/nc_deq_septage_firm_2026-05-11.xlsx`
+  (76,608 bytes; XLSX modern format, same `openpyxl` engine as
+  step 3 — no new dependency required).
+- **Manual column inspection.** Exactly 1 data sheet named
+  `PermittedSeptageForm_20260428` (no "About" sheet — the
+  content-date is encoded in the sheet name itself as a trailing
+  `_YYYYMMDD`). 759 firm rows × 9 columns: `County`, `Waste`,
+  `Activity`, `Status`, `Permit`, `Name`, `Address`, `Contact`,
+  `Phone`. **Zero nulls anywhere.** Stable identifier confirmed:
+  `Permit`, 100% populated and 100% unique across all 759 rows.
+  Format: `NCS-\d{5}` (e.g. `NCS-00047`, `NCS-01837`). The
+  `Waste` / `Activity` / `Status` columns are **uniform across
+  all 759 rows** — `Septage` / `Hauler` / `Open` — so this is a
+  pure category-4 source with no per-row classifier decoding
+  required.
+- **Built `scrapers/state/nc_deq_septage_firm.py`** mirroring the
+  solid-waste loader: Playwright primary (kept for forward-compat)
+  → manual-drop pickup of the newest `.xlsx` in
+  `local/manual_drops/nc_deq_septage_firm/`. Same shared loader
+  utilities (`_loader_utils.py`), same RFC 7231 `last_modified`
+  format. Content-date parsed from the trailing `_YYYYMMDD` on
+  the sheet name (regex `r"(\d{8})$"` against
+  `PermittedSeptageForm_20260428`) and converted to
+  `Tue, 28 Apr 2026 00:00:00 GMT` — the same upstream content-date
+  as the solid-waste list, which makes sense since NC DEQ DWM
+  publishes both rosters together.
+- **Loader run completed.** Manual-drop path used (Playwright
+  failed as expected). 759 parsed → 759 inserted → 0 updated → 0
+  unchanged → 0 dupes → 0 skipped-no-id. `scraper_run id=10
+  status=success`. `source_signature` for run 10: `http=NULL`
+  (manual_drop path), `bytes=76,608`,
+  `schema_hash=3c14eb5ded70…`, `row_count=759`,
+  `last_modified='Tue, 28 Apr 2026 00:00:00 GMT'`. Re-running is
+  fully idempotent on the same drop (uniform schema-hash + permit
+  set).
+
+**Waste / Activity / Status distribution in this load**
+
+All 759 rows are uniform: `Waste='Septage'`, `Activity='Hauler'`,
+`Status='Open'`. **100% of this load is direct v1 category 4
+coverage** (private/regional septage facilities — the regulated
+hauler-firm side of category 4). No further per-row category
+mapping needed at the resolver layer.
+
+**Geography (top 10 counties)**
+
+```
+Wake          33    Forsyth      21    Davidson    16
+Mecklenburg   30    Buncombe     18    Henderson   16
+Guilford      23    Rowan        18    Cumberland  16
+Johnston      22
+```
+
+`County='-'` rows are out-of-state firms registered to operate in
+NC. Exactly **1 such row** in this load:
+
+| Permit | Name | Address | Contact |
+|---|---|---|---|
+| `NCS-01837` | Blue Diamond Portable Restrooms | `115 Juniper Ridge Road; Conway` | Krista Jasinksi |
+
+The address has no NC ZIP and "Conway" with no state suffix is
+the SC seat of Horry County — this is a SC-physical firm holding
+a NC-DEQ Septage Hauler permit to operate inside NC. Kept in the
+load as authoritative NC-regulatory scope; flagged here for Phase 3
+canonicalization to treat as `NC-jurisdiction-with-SC-physical-site`.
+
+**Cross-state sanity**: this source has no `State` column. 758/759
+rows have an explicit NC `County`; 1/759 has `County='-'`
+(out-of-state, documented above). Zero rows leak into wrong-state
+regulatory scope — every row is by construction NC-DEQ-permitted.
+
+**Cumulative `raw_facility_record` after this load**
+
+```
+epa_echo                            92,326
+epa_cwns_2022                        3,132
+tceq_msw_facilities_xls              1,494
+nc_deq_non_discharge_facilities      1,259
+nc_deq_septage_firm_list               759
+nc_deq_solid_waste_facility_list       435
+─────────────────────────────────  ──────────
+TOTAL                               99,405
+```
+
+**Decisions made**
+
+- **Sheet-name date parsing.** Unlike the solid-waste XLSX (which
+  has an About sheet with `Date Created: April 28, 2026`), this
+  XLSX has exactly one data sheet whose name encodes the content
+  date as a `_YYYYMMDD` suffix. Loader parses that with
+  `re.compile(r"(\d{8})$")` against the sheet name and falls back
+  to the file's mtime if the regex doesn't match. Captured in the
+  loader's docstring as the primary date-discovery path for this
+  source.
+- **Out-of-state firm kept in load.** The single `County='-'` row
+  is a SC-physical firm with a NC-DEQ Septage Hauler permit. NC's
+  regulatory scope is the source of truth for v1; the row stays.
+  Phase 3 canonicalization marks it for review (physical site is
+  outside the v1 coverage set `{TX, NC}`, but the permit-holding
+  entity is NC-regulated and therefore in scope).
+- **No state-column assertion needed.** Same reasoning as the
+  Non-Discharge ArcGIS layer: the source is NC-by-construction;
+  per-row state assertion would add noise without information. The
+  resolver treats `nc_deq_septage_firm_list` rows as `state='NC'`.
+
+**Anomalies / non-issues**
+
+- **None blocking.** Playwright block was expected (same
+  network-layer WAF rule on the same edocs document repository).
+  The single out-of-state firm is documented above and handed off
+  to Phase 3.
+
+**Deviations from the brief**
+
+- File format correction (same as step 3): the audit doc
+  anticipated PDF format for these documents; both edocs documents
+  are actually XLSX. Captured in the step 3 entry; restating here
+  for completeness.
+
+---
+
 ## 2026-05-12 — Phase 2 step 3 (NC DEQ Solid Waste loader via manual-drop XLSX)
 
 **Completed**
@@ -142,7 +276,7 @@ TOTAL                               98,646
 
 ---
 
-## 2026-05-12 — Phase 3 prep: ID-first match rules
+## 2026-05-12 — Phase 3 prep: resolver match rules and category filters
 
 Phase 3 (Days 5–6) entity resolution will use **ID-first matching** that
 overrides score-based RapidFuzz matching when a stable identifier is
@@ -160,8 +294,10 @@ the resolver implementation doesn't need to re-derive them.
 | EPA CWNS 2022 | `FACILITIES.CWNS_ID` | CWNS_ID (11 digits, FIPS-prefixed; e.g. `48001257001` = TX, Bee County) | First two digits encode the state FIPS code (48=TX, 37=NC). Useful as a cross-source state filter. |
 | TCEQ MSW XLS | `Additional ID` | TCEQ permit/registration number (alphanumeric, e.g. `1009A`, `48000`) | Range-coded per GI-613 (1–8999 permit, 40000–41999 transfer station registration, 42000–42999 compost registration, 48000–49999 beneficial gas recovery, etc. — full mapping in the Phase 2 step 1 build_log entry). |
 | TCEQ MSW XLS | `RN` | TCEQ Regulated Entity Number (e.g. `RN102335312`) | Stable across multiple permits for a single physical site. Better entity key than `Additional ID` for canonical-facility-level resolution; less unique per row. |
-| NC DEQ Non-Discharge (ArcGIS) | `PERMITNUMBER` | **`WQ\d{7}`** (e.g. `WQ0015929`, `WQ0041666`) | NC state non-discharge permit ID. **Primary state-permit-id disambiguator for the NC side.** 100% populated and unique across the 1,259 rows loaded in Phase 2 step 2. |
+| NC DEQ Non-Discharge (ArcGIS) | `PERMITNUMBER` | **`WQ\d{7}`** (e.g. `WQ0015929`, `WQ0041666`) | NC state non-discharge permit ID. **Primary state-permit-id disambiguator for the NC side (DWR division).** 100% populated and unique across the 1,259 rows loaded in Phase 2 step 2. |
 | NC DEQ Non-Discharge (ArcGIS) | `ObjectId` | ArcGIS OID, 1-N integer per layer | Volatile across re-publishes; not stable across drift; use as last-resort tiebreaker only. |
+| NC DEQ Solid Waste (DWM XLSX) | `Facility Id` | `<county-prefix>-<type-code>-<year-or-suffix>` (e.g. `0104-MSWLF-1994`, `0109-COMPOST-2025`, `0102-INCIN-M-`) | NC DEQ DWM composite facility ID. **Primary disambiguator for the NC solid-waste side.** 100% populated and unique across the 435 rows loaded in Phase 2 step 3. |
+| NC DEQ Septage Firm (DWM XLSX) | `Permit` | **`NCS-\d{5}`** (e.g. `NCS-00308`, `NCS-01837`) | NC DEQ DWM septage firm permit ID. **Primary disambiguator for the NC septage / category-4 side.** 100% populated and unique across the 759 rows loaded in Phase 2 step 4. Distinct namespace from the `WQ` non-discharge permits. |
 
 ### Resolver match precedence (locked decision 8.10, restated)
 
@@ -190,9 +326,29 @@ In addition to the ID-first rules, the resolver must apply the
 state-coverage filter on `raw_payload` state fields — see the Phase
 1 Day 2 step 1 entry below for the verbatim rule. For v1 the
 coverage set is `{'TX', 'NC'}`. For NC sources without an explicit
-state column (ArcGIS Non-Discharge is the canonical example) the
-resolver treats source-of-record geography as authoritative: the
-layer is NC by construction, no per-row state assertion needed.
+state column (ArcGIS Non-Discharge and the NC DEQ Septage Firm list
+are the canonical examples) the resolver treats source-of-record
+geography as authoritative: the layer is NC by construction, no
+per-row state assertion needed. The Septage Firm list's `County='-'`
+out-of-state rows are an explicit exception — they stay in v1 as
+NC-regulatory-scope with `confidence='low'` and a flag for review.
+
+### Per-source row-exclusion filters
+
+Two per-source row-exclusion filters apply at canonical-resolution
+time. Both are pinned here so the resolver can apply them without
+re-deriving from source-specific build_log entries. Both operate at
+the **canonical resolver layer**, not at the raw-load layer —
+`raw_facility_record` keeps every parsed row from the source as-is
+(idempotent, source-of-record fidelity).
+
+| Source | Filter | Rule | Reason |
+|---|---|---|---|
+| `tceq_msw_facilities_xls` | **NOT CONSTRUCTED status flag** | Skip rows where `raw_payload->>'Status' = 'NOT CONSTRUCTED'`. | These are permitted-but-never-built facilities (the 155 `SUBT` physical-type rows are construction-over-closed-landfill projects that were never built — see Phase 2 step 1 entry). They have a permit number but no physical site to canonicalize against. Raw load keeps them for completeness; canonical resolution skips them. |
+| `nc_deq_solid_waste_facility_list` | **HHW Collection exclusion (citizen drop-off)** | Skip rows where `raw_payload->>'Activity' = 'Collection'` when canonicalizing to v1 category 7 (Waste Transfer / Material Recovery). The 30 rows in this bucket are HHW citizen drop-off points (paint, batteries, electronics) — **not** waste transfer facilities accepting manifested loads from registered haulers. Default exclude. **Exception:** include with `confidence='low'` for review if the row's `raw_payload` shows explicit hauler-receiving capability. | Category 7 means manifested-load transfer for haulers, not citizen-served HHW collection points. NC's `Activity='Collection'` is conceptually similar to TCEQ's `5CC` Citizens Collection Stations (which TCEQ DOES code as category 7 per GI-613 with a "small/municipal subtype" qualifier), but NC's variant lacks TCEQ's hauler-receiving overlap, so we exclude by default for v1. v2 may revisit if category 7 widens to include citizen-facing subtypes. |
+
+This separation lets Phase 4 (category-coded views) re-include
+filtered rows if v2 scope ever widens — no re-scrape needed.
 
 ### Source-record-id strategy in `raw_facility_record`
 
@@ -204,6 +360,8 @@ Per-source choices already made by the loaders:
 | `epa_cwns_2022` | `CWNS_ID` from FACILITIES.csv | The CWNS spine identifier. |
 | `tceq_msw_facilities_xls` | `Additional ID` (TCEQ permit/registration number) | Per-permit row granularity. Phase 3 dedupes by `RN` if it needs entity-level. |
 | `nc_deq_non_discharge_facilities` | `PERMITNUMBER` (`WQ\d{7}`) | NC state non-discharge ID — fully populated, unique within source. |
+| `nc_deq_solid_waste_facility_list` | `Facility Id` (`<county-prefix>-<type-code>-<year-or-suffix>`, e.g. `0104-MSWLF-1994`) | NC DEQ DWM composite facility ID. 100% populated and unique within source (435 rows). Encodes county-prefix + facility-type + permit year — convenient for joint TX/NC subtyping. |
+| `nc_deq_septage_firm_list` | `Permit` (`NCS-\d{5}`, e.g. `NCS-00308`) | NC DEQ DWM septage firm permit ID. 100% populated and unique within source (759 rows). Distinct namespace from the WQ Non-Discharge permits (different DEQ division). |
 
 This file is the canonical reference for these formats. When a new
 state ships, the loader documents its state-ID format here as a new
