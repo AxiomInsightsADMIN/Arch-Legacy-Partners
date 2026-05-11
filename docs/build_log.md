@@ -6,6 +6,76 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 3 prep: ID-first match rules
+
+Phase 3 (Days 5–6) entity resolution will use **ID-first matching** that
+overrides score-based RapidFuzz matching when a stable identifier is
+shared across rows. The kickoff brief's locked decision 8.10 lists
+FRS, NPDES, and "state ID" as the override IDs; this prep entry pins
+the specific state-ID formats we have surfaced through Phase 1–2 so
+the resolver implementation doesn't need to re-derive them.
+
+### Stable identifier formats encountered
+
+| Source | Field name in `raw_payload` | Format | Notes |
+|---|---|---|---|
+| EPA ECHO CWA REST | `SourceID` | NPDES permit (e.g. `TX0047589`, `NCC212552`) | State letter prefix + 7 digits. Already the de-facto NPDES identifier. |
+| EPA ECHO CWA REST | `RegistryID` | FRS Registry ID, 12 digits (e.g. `110071320510`) | The federal cross-system identifier. |
+| EPA CWNS 2022 | `FACILITIES.CWNS_ID` | CWNS_ID (11 digits, FIPS-prefixed; e.g. `48001257001` = TX, Bee County) | First two digits encode the state FIPS code (48=TX, 37=NC). Useful as a cross-source state filter. |
+| TCEQ MSW XLS | `Additional ID` | TCEQ permit/registration number (alphanumeric, e.g. `1009A`, `48000`) | Range-coded per GI-613 (1–8999 permit, 40000–41999 transfer station registration, 42000–42999 compost registration, 48000–49999 beneficial gas recovery, etc. — full mapping in the Phase 2 step 1 build_log entry). |
+| TCEQ MSW XLS | `RN` | TCEQ Regulated Entity Number (e.g. `RN102335312`) | Stable across multiple permits for a single physical site. Better entity key than `Additional ID` for canonical-facility-level resolution; less unique per row. |
+| NC DEQ Non-Discharge (ArcGIS) | `PERMITNUMBER` | **`WQ\d{7}`** (e.g. `WQ0015929`, `WQ0041666`) | NC state non-discharge permit ID. **Primary state-permit-id disambiguator for the NC side.** 100% populated and unique across the 1,259 rows loaded in Phase 2 step 2. |
+| NC DEQ Non-Discharge (ArcGIS) | `ObjectId` | ArcGIS OID, 1-N integer per layer | Volatile across re-publishes; not stable across drift; use as last-resort tiebreaker only. |
+
+### Resolver match precedence (locked decision 8.10, restated)
+
+1. **ID-first match overrides score-based.** If two raw rows share a
+   stable identifier from the table above, they resolve to the same
+   `canonical_facility` regardless of name-similarity score. This
+   applies to:
+   - `SourceID` (NPDES, federal-style 9-char permit)
+   - `RegistryID` (FRS, 12-digit)
+   - `Additional ID` paired with `RN` (TCEQ — `Additional ID` is the
+     per-permit key, `RN` is the per-entity key; the resolver uses
+     `RN` when a TCEQ row needs to merge with a non-TCEQ row about
+     the same physical site)
+   - `PERMITNUMBER` (NC DEQ state non-discharge format `WQ\d{7}`)
+2. **RapidFuzz score on `name + city + state` when no ID overlaps.**
+   Auto-merge ≥ 92, hold-for-review 75–91, reject < 75 per the brief.
+3. **200m geocoder proximity tiebreak.** Bumps borderline matches up
+   one tier when coords are close. NC Non-Discharge rows have NULL
+   geometry by NC DEQ's privacy decision, so they will fail the
+   proximity check; the resolver should treat NULL coords as
+   "no tiebreak available" rather than "no match."
+
+### State-coverage filter (already documented at Phase 1 Day 2 step 1)
+
+In addition to the ID-first rules, the resolver must apply the
+state-coverage filter on `raw_payload` state fields — see the Phase
+1 Day 2 step 1 entry below for the verbatim rule. For v1 the
+coverage set is `{'TX', 'NC'}`. For NC sources without an explicit
+state column (ArcGIS Non-Discharge is the canonical example) the
+resolver treats source-of-record geography as authoritative: the
+layer is NC by construction, no per-row state assertion needed.
+
+### Source-record-id strategy in `raw_facility_record`
+
+Per-source choices already made by the loaders:
+
+| Source slug | `source_record_id` | Reason |
+|---|---|---|
+| `epa_echo` | `SourceID` (NPDES), fallback `FRS:<RegistryID>` | NPDES is the canonical CWA identifier; FRS is the federal cross-system fallback when an ECHO row has no NPDES (rare). |
+| `epa_cwns_2022` | `CWNS_ID` from FACILITIES.csv | The CWNS spine identifier. |
+| `tceq_msw_facilities_xls` | `Additional ID` (TCEQ permit/registration number) | Per-permit row granularity. Phase 3 dedupes by `RN` if it needs entity-level. |
+| `nc_deq_non_discharge_facilities` | `PERMITNUMBER` (`WQ\d{7}`) | NC state non-discharge ID — fully populated, unique within source. |
+
+This file is the canonical reference for these formats. When a new
+state ships, the loader documents its state-ID format here as a new
+row in the table above and the resolver picks it up via the
+ID-first override list.
+
+---
+
 ## 2026-05-12 — Phase 2 step 2 (NC DEQ Non-Discharge ArcGIS loader)
 
 **Completed**

@@ -74,18 +74,76 @@ across NC DEQ application subdomains.
 
 ### B. ArcGIS / Esri assets discovered
 
+**Initial assumption (round-1 audit, now corrected below):**
+
 | Source | URL | Notes |
 |---|---|---|
-| Non-Discharge Permit Facility Map (Esri Experience) | `https://experience.arcgis.com/experience/689283d17bf342c2a96364fbab09a5d8` | JS-driven SPA. Reached via DWR Non-Discharge "Permit Facility Map" page. Per-facility data is in the underlying FeatureServer. |
-| NC OneMap REST root | `https://services.nconemap.gov/secure/rest/services` | **Reachable.** Returns 46 services + 8 folders. Includes `NC1Map_Environment` and `NC1Map_Hazardous_Waste` (FeatureServer + MapServer pairs). Layer discovery into the Environment service is the natural Phase-2 follow-up. |
+| Non-Discharge Permit Facility Map (Esri Experience) | `https://experience.arcgis.com/experience/689283d17bf342c2a96364fbab09a5d8` | JS-driven SPA. Reached via DWR Non-Discharge "Permit Facility Map" page. |
+| NC OneMap REST root | `https://services.nconemap.gov/secure/rest/services` | Reachable. 46 services + 8 folders at root; 137 services counting folder contents. |
 
-The Esri FeatureServer pattern is well-suited for scraping: each layer
-has a paged JSON query endpoint that respects standard FeatureServer
-semantics. No browser needed, no JS-driven UI flow, no Playwright. If
-the Non-Discharge facility data is published as a queryable layer on
-`NC1Map_Environment`, that becomes our primary path for category 3
-(land application) and a corroboration path for category 1 (NPDES
-POTW).
+**FeatureServer discovery chain (Phase 2 step 2; documented here so
+maintainers don't re-walk the chain if NC reshuffles their GIS
+hosting):**
+
+1. The DWR Non-Discharge **"Permit Facility Map"** page on
+   `www.deq.nc.gov` embeds the Esri Experience SPA at
+   `https://experience.arcgis.com/experience/689283d17bf342c2a96364fbab09a5d8`.
+2. AGOL item metadata for that Experience
+   (`https://www.arcgis.com/sharing/rest/content/items/<id>?f=json`)
+   identifies it as item `689283d17bf342c2a96364fbab09a5d8` —
+   *"DWR Locator Map (Public)"* owned by `DWR_GIS_Team`, hosted on
+   the NC DEQ AGOL portal **`https://ncdenr.maps.arcgis.com`**.
+3. The Experience's `/data?f=json` references a Web Map item
+   `b200deee16ae417a931e10d96e9f2ac8` —
+   *"Regional Office: All-in-One Map-withGroups-(Public)"*.
+4. That Web Map references **44 FeatureServer/MapServer URLs**, all
+   on `https://services2.arcgis.com/kCu40SDxsCGcuUWO/...` (the
+   AGOL-hosted feature service host for NC DEQ's organization).
+5. The Non-Discharge facility layer is at:
+   ```
+   https://services2.arcgis.com/kCu40SDxsCGcuUWO/arcgis/rest/services/
+       NPDES_Non_Discharge_Permits_(View)/FeatureServer/0
+   ```
+6. Two adjacent layers in the same host worth knowing:
+   - `Non_Discharge_Land_Application_Field_Permits_(View)/FeatureServer/0`
+     — per-application-field detail (sub-record of the Non-Discharge
+     permit). Not loaded in Phase 2 step 2; consider for Phase 5 if
+     Phase 3 needs field-level resolution.
+   - `NPDES_Wastewater_Discharge_Permits/FeatureServer/0` — NC's NPDES
+     wastewater discharge permits. Corroborates EPA ECHO's NC POTW
+     coverage. Not loaded; ECHO is already the primary path for
+     category 1.
+
+**Crucial correction to the round-1 assumption.** `NC1Map_Environment`
+on `services.nconemap.gov` is the wrong service — it carries
+forestry, estuarine habitat, and landslide layers, **not** any
+DEQ facility data. The NC OneMap portal hosts statewide geospatial
+foundation data (boundaries, hydrography, parcels, imagery); DEQ's
+operational permit layers live on their own AGOL org at
+`services2.arcgis.com/kCu40SDxsCGcuUWO`. Future maintainers adding
+NC DEQ layers should look on the NC DEQ AGOL host first, not on NC
+OneMap. The discovery script lives at `local/_nc_arcgis_probe*.py`
+(round 1 through 4) — round 4 is the one that finally landed the
+chain.
+
+**Reusable lookup recipe** for any future NC DEQ AGOL-hosted layer:
+
+```
+1. Find the public-facing Experience URL on deq.nc.gov (it embeds
+   experience.arcgis.com/experience/<32-char-id>).
+2. GET https://www.arcgis.com/sharing/rest/content/items/<id>?f=json
+   -> identifies the owner org (portal URL).
+3. GET https://www.arcgis.com/sharing/rest/content/items/<id>/data?f=json
+   -> the Experience config, which references the Web Map item id.
+4. GET <org-portal>/sharing/rest/content/items/<webmap-id>/data?f=json
+   -> dumps every FeatureServer/MapServer URL the Web Map uses.
+5. The layer URL pattern is .../<service>/FeatureServer/<layer-id>.
+```
+
+The Esri FeatureServer pattern is well-suited for scraping: each
+layer has a paged JSON query endpoint with standard semantics
+(resultOffset, resultRecordCount, returnCountOnly, returnGeometry,
+outSR). No browser needed, no JS-driven UI flow, no Playwright.
 
 ### C. The edocs.deq.nc.gov constraint
 
