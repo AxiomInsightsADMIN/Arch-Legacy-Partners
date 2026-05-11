@@ -6,6 +6,9 @@ playwright>=1.49,<2
 beautifulsoup4>=4.12,<5
 pdfplumber>=0.11,<1
 requests>=2.32,<3
+# Excel binary (.xls / BIFF) parsing — needed for the TCEQ MSW XLS loader
+# (Phase 2 step 1). pandas.read_excel uses xlrd as the engine for legacy .xls.
+xlrd>=2.0.1,<3
 
 # Entity resolution
 rapidfuzz>=3.10,<4

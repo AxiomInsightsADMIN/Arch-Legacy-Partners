@@ -6,6 +6,152 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-11 — Phase 2 step 1 (TCEQ MSW XLS loader)
+
+**Completed**
+- **TCEQ Public Data Lookup sub-page audit** at
+  [`docs/tceq_pdl_audit.md`](tceq_pdl_audit.md). Round-1/2/3
+  reconnaissance over 13+5+3 candidate sub-pages on `www.tceq.texas.gov`.
+  Major findings:
+  - The MSW Data hub publishes a weekly-refreshed XLS at a static URL
+    (`msw-facilities-texas.xls`, 824 KB, BIFF binary). This is the
+    primary v1 TCEQ source.
+  - Every TCEQ application subdomain (`www2/www3/www6/www15/www18`)
+    returns the same blanket `User-agent: * / Disallow: /` — 28-byte
+    identical robots.txt. WQPAQ (TPDES), WQ-DPA (general permits),
+    WWPS (plans + specs), STEERS (e-permitting), CRPUB (registry)
+    are all declined per locked decision 8.12.
+  - No public registry of registered Sludge / Septage transporters on
+    `www.tceq.texas.gov`. The data exists in CRPUB (disallowed).
+  - No public Texas POTW permit XLS or biosolids land-application XLS
+    on the allowed path.
+- **Source seed migration**
+  [`supabase/migrations/20260511220000_tceq_subsource_seed.sql`](../supabase/migrations/20260511220000_tceq_subsource_seed.sql)
+  applied — adds one row `tceq_msw_facilities_xls`. Source count now 13.
+- **Schema migration**
+  [`supabase/migrations/20260511221000_add_last_modified_to_source_signature.sql`](../supabase/migrations/20260511221000_add_last_modified_to_source_signature.sql)
+  applied — adds `last_modified TEXT NULL` to `source_signature`.
+  *Reasoning for the schema change:* the spec called for capturing the
+  HTTP `Last-Modified` header into `source_signature`, and the existing
+  schema had no column for it. The change was authorized explicitly
+  before apply — earlier the harness correctly blocked an unauthorized
+  attempt to push the same migration, which prompted the explicit
+  authorization. The column is nullable with no default; loaders that
+  don't see a `Last-Modified` header leave it NULL and fall back to the
+  existing `response_byte_size` for cadence signaling.
+- **New dependency**: `xlrd>=2.0.1,<3` added to `requirements.txt` and
+  installed in the venv (xlrd 2.0.2). Needed for pandas to parse the
+  TCEQ BIFF `.xls` (`pd.read_excel(..., engine="xlrd")`).
+- **TCEQ MSW XLS loader** at
+  [`scrapers/state/tceq_msw_xls.py`](../scrapers/state/tceq_msw_xls.py).
+  New `scrapers/state/` subdirectory (parallel to `scrapers/federal/`,
+  per Ryan's spec). Imports shared helpers from `scrapers/_loader_utils.py`
+  for db + scraper_run lifecycle.
+
+**v1 scope concessions doc**
+
+- New document [`docs/v1_scope_limitations.md`](v1_scope_limitations.md)
+  written. Frames the TCEQ robots-disallow finding as a Phase 6
+  deliverable for Arch Legacy Partners (not as a build apology).
+  Sections cover:
+  - the disallow finding across the five TCEQ subdomains
+  - the four functionally affected query interfaces (WQPAQ / WQ-DPA /
+    WWPS / STEERS) by purpose
+  - the affected v1 categories in Texas (1 — POTW receiving;
+    3 — land application; 4 — private septage)
+  - the alternative path: Texas Public Information Act request to
+    TCEQ Records-Services, with the request template, where to send
+    it, expected timeline, and how Axiom Insights would ingest the
+    returned spreadsheet via a one-off migration
+  - explicit statement that the TX concession does **not** apply to
+    NC; the NC DEQ audit is a separate Phase 2 activity
+  - forward roadmap pointers to Phase 4 LLM enrichment and Phase 4.5
+    discovery crawl which together close most of the gap for
+    categories 1 / 3 / 4
+
+**Loader build details**
+
+- Source URL: `https://www.tceq.texas.gov/assets/public/permitting/waste/msw/msw-facilities-texas.xls`
+- Stable identifier: `Additional ID` column (TCEQ permit / registration
+  / notification number). Near-unique (1494/1496 unique in the
+  2026-05-11 sample; 1 null + 1 value duplicated across 2 rows).
+- Same payload pattern as the federal loaders: one row per facility
+  in `raw_facility_record`, `raw_payload` is a JSONB dict with the
+  full XLS row (22 columns).
+- Cross-state sanity check on `Near Phys Loc State`: 1,494 rows TX,
+  0 non-TX (1 null row was the one we dropped for empty Additional ID).
+- `last_modified` HTTP header captured into `source_signature.last_modified`.
+- In-batch dedupe added after the first run failed with Postgres'
+  "ON CONFLICT DO UPDATE cannot affect row a second time" error. The
+  XLS has 1 value of `Additional ID` appearing on 2 rows; my batch
+  upsert tried to apply ON CONFLICT twice in one statement. Fix:
+  dedupe by Additional ID in Python with last-write-wins semantics
+  before sending to the DB. Counted as `rows_skipped_dupe_id` so
+  the anomaly remains visible in the run log.
+
+**Counts (matches in-XLS reality)**
+
+| | Value |
+|---|---:|
+| HTTP status | 200 |
+| Bytes downloaded | 843,776 |
+| Last-Modified header | `Fri, 27 Mar 2026 10:00:18 GMT` |
+| Rows parsed | 1,497 |
+| Rows skipped (no `Additional ID`) | 1 |
+| Rows skipped (in-XLS dupe Additional ID) | 2 |
+| **Rows inserted into `raw_facility_record`** | **1,494** |
+| Rows updated | 0 |
+| Rows unchanged | 0 |
+| Cross-state rows (`Near Phys Loc State` != TX) | 0 |
+| Schema hash | `b16e6bb0c7c5…` |
+| Elapsed | 5.9 s |
+
+**Anomalies / non-issues**
+
+- **Last-Modified is 2026-03-27**, ~6 weeks before today (2026-05-11).
+  The source page claims weekly Friday refresh, but the captured header
+  suggests either (a) the file legitimately hasn't been touched in 6
+  weeks or (b) a CDN is serving a stale Last-Modified. We don't act on
+  this — the loader stores what the server emitted; the drift detector
+  in Phase 5 can compare across runs. Worth re-checking next week.
+- **scraper_run id=5 is recorded as `status=failed`** with the
+  ON-CONFLICT-twice error message. This is the FIRST attempt before
+  the dedupe fix landed. I deliberately leave it in the DB as part of
+  the audit trail — failed runs are a real category and the failure
+  handling correctly recorded the state. The successful retry is
+  scraper_run id=6.
+- **Physical Type distribution** (top): 5RR=320, 5CC=193, 5TS=157,
+  SUBT=155, 1=118, 5RCX=96, etc. Phase 3 canonical resolution will
+  map these TCEQ codes to our 7 categories using publication GI-613
+  as the decoder. (Codes 5* are Type V "processing facilities" —
+  composting, transfer, recycling, etc.; codes 1/4 are landfills.)
+- **Physical Site Status distribution**: 1,184 ACTIVE, 256
+  NOT_CONSTRUCTED, 54 INACTIVE. Phase 3 should filter on ACTIVE.
+
+**Cumulative raw_facility_record by source after this load**
+
+```
+epa_echo                  92,326
+epa_cwns_2022              3,132
+tceq_msw_facilities_xls    1,494
+─────────────────────── ──────────
+TOTAL                     96,952
+```
+
+**In progress / next**
+
+- Step 2: NC DEQ audit (DWR + DWM). Separate, NC-specific.
+
+**Deviations from the brief**
+
+- The `scrapers/state/` directory is new — original brief layout had
+  per-state subdirs (`scrapers/texas/`, `scrapers/north_carolina/`).
+  Ryan explicitly directed `scrapers/state/tceq_msw_xls.py` in the
+  step 1 instructions; honoring that. The unused per-state `.gitkeep`
+  dirs remain on disk; they'll be cleaned up later or repurposed.
+
+---
+
 ## 2026-05-11 — Day 2 step 3 (EPA CWNS 2022 loader via Playwright)
 
 **Completed**
