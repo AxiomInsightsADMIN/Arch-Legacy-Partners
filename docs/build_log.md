@@ -6,6 +6,111 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 5 follow-on: federal loaders consolidate state slices into single source_signature per refresh; historical per-state signatures cleaned up
+
+The Phase 5 item 3 drift detector test surfaced a pre-existing flaw in
+the federal loaders: both `scrapers/federal/epa_echo.py` and
+`scrapers/federal/epa_cwns.py` wrote ONE `source_signature` PER STATE
+within a single logical "refresh," not one per refresh. The drift
+detector compares "latest signature" vs "immediately previous
+signature" per locked decision 8.7, so the per-state writes caused
+the detector to compare a 19,827-row NC slice against a 72,499-row
+TX slice and flag a 72% row-count drop pause. Same shape for CWNS:
+820 NC vs 2,312 TX → 64% drop pause.
+
+The fix is upstream (Option A per Ryan): refactor both loaders so a
+single logical run opens ONE `scraper_run`, walks every state through
+a stats-only `load_state(state, *, conn, source_id, run_id)`, then
+emits ONE consolidated `source_signature` at the end.
+
+### Code change
+
+`load_state` no longer manages `conn`/`begin_run`/`write_signature`/
+`finish_run` — the caller (`run_all`) owns the run lifecycle. Per-state
+stats (bytes downloaded, rows parsed, schema hash, HTTP status)
+accumulate in memory; `run_all` aggregates them and writes one signature
+covering both states.
+
+Schema-hash invariant: federal sources return the same CSV column set
+per state. `run_all` asserts `schema_hash` matches across states and
+fails the run with a `schema_hash mismatch across states` error if they
+diverge — that would be real upstream schema drift worth halting on.
+
+### Historical-signature cleanup
+
+Four `source_signature` rows existed from the pre-fix per-state runs
+and are now removed via a single SQL DELETE:
+
+```sql
+DELETE FROM source_signature
+ WHERE source_id IN (SELECT id FROM source
+                      WHERE slug IN ('epa_echo','epa_cwns_2022'));
+```
+
+Audit trail of the deleted rows (preserved here because the rows
+themselves are gone):
+
+| sig_id | source_slug | run_id | http | bytes | hash | rows | captured_at |
+|---:|---|---:|---:|---:|---|---:|---|
+| 1 | `epa_echo` | 1 | 200 | 19,549,932 | `699dec10fc9a` | 72,499 | 2026-05-11 11:40:51 UTC |
+| 2 | `epa_echo` | 2 | 200 | 5,085,758 | `699dec10fc9a` | 19,827 | 2026-05-11 11:41:26 UTC |
+| 3 | `epa_cwns_2022` | 3 | 200 | 416,605 | `cb282fec57ee` | 2,312 | 2026-05-11 12:09:46 UTC |
+| 4 | `epa_cwns_2022` | 4 | 200 | 200,474 | `cb282fec57ee` | 820 | 2026-05-11 12:10:13 UTC |
+
+`raw_facility_record` is untouched (99,405 rows preserved across the
+cleanup). `scraper_run` rows for the historical per-state runs (ids 1,
+2, 3, 4) are also untouched — only the operational metadata that is
+now architecturally wrong gets removed. The `scraper_run` history
+remains so future analysts can correlate raw rows back to their
+original load runs via `raw_facility_record.scraper_run_id`.
+
+### Re-run results
+
+Both loaders re-ran with the fix. Hash-based idempotency confirmed:
+
+```
+ECHO  scraper_run id=11
+  [OK] TX: parsed=72,499 inserted=0 updated=0 unchanged=72,499 in 85.3s
+  [OK] NC: parsed=19,827 inserted=0 updated=0 unchanged=19,827 in 25.2s
+  consolidated signature: bytes=24,635,690  rows=92,326  hash=699dec10fc9a…
+
+CWNS  scraper_run id=12
+  [OK] TX: facilities=2,312 inserted=0 updated=0 unchanged=2,312 in 20.1s
+  [OK] NC: facilities=820   inserted=0 updated=0 unchanged=820   in 13.7s
+  consolidated signature: bytes=617,079  rows=3,132  hash=cb282fec57ee…
+```
+
+Cumulative `raw_facility_record` unchanged at 99,405.
+
+### Drift detector verification
+
+```
+=== Drift report (2026-05-12T08:26:24.489577+00:00) ===
+  overall:       pass
+  sources seen:  6
+  paused:        0
+
+  epa_cwns_2022                    pass    (first_run_no_prior)
+  epa_echo                         pass    (first_run_no_prior)
+  nc_deq_non_discharge_facilities  pass    (first_run_no_prior)
+  nc_deq_septage_firm_list         pass    (first_run_no_prior)
+  nc_deq_solid_waste_facility_list pass    (compared_vs_prior, byte-identical)
+  tceq_msw_facilities_xls          pass    (first_run_no_prior)
+```
+
+6/6 pass. ECHO and CWNS show `first_run_no_prior` because the
+consolidated signature is the only signature now (the per-state ones
+are gone). NC SW shows `compared_vs_prior` because it had two
+identical signatures from the original two runs (byte-identical, so
+no drift). The remaining four sources have exactly one signature each
+and pass by default per the detector's `first_run_no_prior` rule.
+
+Phase 5 is now fully complete. The next June 1 monthly cron will
+write fresh consolidated signatures for ECHO + CWNS that the detector
+can compare cleanly against the May 12 baselines just written.
+
+---
+
 ## 2026-05-12 — Phase 6 design notes (pin: SMTP secrets handoff for monthly refresh alerts)
 
 Pinned now so the secret-set handoff isn't dropped between Phase 5

@@ -6,12 +6,26 @@ target state and upserts raw observations into `raw_facility_record` with
 source='epa_echo'. Honors the ECHO bulk-data path (NOT the
 robots-disallowed search-results pages).
 
-Flow per state:
-  1) get_facilities -> QueryID + total QueryRows
-  2) get_download   -> CSV with column codes 1..34 (34 useful columns)
-  3) Parse CSV rows into JSON payloads
-  4) Upsert into raw_facility_record with no-change detection via payload_hash
-  5) Update scraper_run + write source_signature
+Flow per logical refresh (covering BOTH states in one scraper_run):
+  for each state:
+    1) get_facilities -> QueryID + total QueryRows
+    2) get_download   -> CSV with column codes 1..34 (34 useful columns)
+    3) Parse CSV rows into JSON payloads
+    4) Upsert into raw_facility_record with no-change detection via payload_hash
+    capture per-state stats (bytes downloaded, rows parsed, schema hash) into
+    in-memory StateLoadResult.
+  After all states done:
+    5) Write ONE consolidated source_signature covering all states
+    6) Mark scraper_run='success' with the aggregate counts
+
+**Single-signature-per-refresh design (Phase 5 follow-on).** The original
+Phase-1 implementation wrote one source_signature per state, which made
+the drift detector compare "latest NC slice" vs "prior TX slice" and
+trigger a 72% row-count-drop pause every month. Locked decision 8.7's
+drift comparison expects same-shape signatures across runs, so we now
+consolidate: aggregate bytes + rows across states, assert schema_hash
+matches across states (it does for federal sources by construction),
+and emit one signature row at the end of the run.
 
 Idempotent: re-running is safe and is a no-op on unchanged rows. The
 ON CONFLICT clause skips the row UPDATE when payload_hash matches.
@@ -168,11 +182,17 @@ def _flush_batch(cur, batch: list[tuple]) -> tuple[int, int]:
 
 
 # --------------------------------------------------------------------------
-# Per-state load
+# Per-state load — caller owns scraper_run + source_signature lifecycle
 # --------------------------------------------------------------------------
-def load_state(state: str) -> StateLoadResult:
+def load_state(state: str, *, conn, source_id: int, run_id: int) -> StateLoadResult:
+    """Pull + upsert one state's worth of ECHO data using the caller's
+    shared `conn` + `run_id`. Does NOT call begin_run/write_signature/
+    finish_run — that's the orchestrator's job (`run_all` below).
+    Returns per-state stats so `run_all` can aggregate them into a
+    single consolidated source_signature."""
     print(f"\n[{state}] starting ECHO load", flush=True)
     t0 = time.time()
+    cur = conn.cursor()
 
     # 1) setup query
     setup_status, qrows, qid = echo_setup(state)
@@ -187,14 +207,6 @@ def load_state(state: str) -> StateLoadResult:
     headers = reader.fieldnames or []
     schema_hash = hash_payload(",".join(headers))
     print(f"[{state}] parsed {len(headers)} columns; schema_hash={schema_hash[:12]}…", flush=True)
-
-    conn = db_connect()
-    conn.autocommit = False
-    cur = conn.cursor()
-    source_id = get_source_id(cur, "epa_echo")
-    run_id = begin_run(cur, source_id)
-    conn.commit()
-    print(f"[{state}] scraper_run id={run_id} (source_id={source_id})", flush=True)
 
     rows_parsed = 0
     rows_inserted = 0
@@ -235,46 +247,14 @@ def load_state(state: str) -> StateLoadResult:
             rows_inserted += ins
             rows_updated += upd
             conn.commit()
-
-        # 5) signature + finalize run
-        write_signature(
-            cur,
-            source_id,
-            run_id,
-            http_status=dl_status,
-            byte_size=byte_len,
-            schema_hash=schema_hash,
-            row_count=rows_parsed,
-        )
-        finish_run(
-            cur,
-            run_id,
-            "success",
-            rows_in=rows_parsed,
-            rows_inserted=rows_inserted,
-            rows_updated=rows_updated,
-        )
-        conn.commit()
     except Exception as e:
         err = str(e)
         print(f"[{state}] ERROR: {err}", flush=True)
         conn.rollback()
-        try:
-            finish_run(
-                cur,
-                run_id,
-                "failed",
-                rows_in=rows_parsed,
-                rows_inserted=rows_inserted,
-                rows_updated=rows_updated,
-                error_message=err,
-            )
-            conn.commit()
-        except Exception:
-            pass
+        # Do NOT mark the run failed here; the orchestrator decides. We
+        # bubble the error out by populating res.error and returning.
     finally:
         cur.close()
-        conn.close()
 
     elapsed = round(time.time() - t0, 1)
     res = StateLoadResult(
@@ -302,32 +282,106 @@ def load_state(state: str) -> StateLoadResult:
     return res
 
 
-def main(states: list[str]) -> int:
-    results = []
-    for state in states:
-        try:
-            results.append(load_state(state))
-        except Exception as e:
-            print(f"[{state}] FATAL: {e}", flush=True)
-            results.append(
-                StateLoadResult(
-                    state=state,
-                    http_status_setup=None,
-                    http_status_download=None,
-                    query_rows_reported=None,
-                    rows_parsed=0,
-                    rows_inserted=0,
-                    rows_updated=0,
-                    rows_unchanged=0,
-                    rows_skipped_no_id=0,
-                    bytes_downloaded=0,
-                    schema_hash=None,
-                    elapsed_sec=0.0,
-                    error=str(e),
+# --------------------------------------------------------------------------
+# Orchestrator — one scraper_run + one consolidated source_signature
+# --------------------------------------------------------------------------
+def run_all(states: list[str]) -> int:
+    """Open one connection, begin one scraper_run, walk all states, write
+    one consolidated source_signature, finalize the run. Returns shell
+    exit code (0 success, 1 any state failed)."""
+    conn = db_connect()
+    conn.autocommit = False
+    cur = conn.cursor()
+    source_id = get_source_id(cur, "epa_echo")
+    run_id = begin_run(cur, source_id)
+    conn.commit()
+    print(f"[run] scraper_run id={run_id} (source_id={source_id})", flush=True)
+
+    results: list[StateLoadResult] = []
+    consolidated_bytes = 0
+    consolidated_rows = 0
+    consolidated_hash: str | None = None
+    consolidated_http: int | None = None
+    fatal_err: str | None = None
+
+    try:
+        for state in states:
+            res = load_state(state, conn=conn, source_id=source_id, run_id=run_id)
+            results.append(res)
+            if res.error:
+                fatal_err = f"state {state} failed: {res.error}"
+                break
+            consolidated_bytes += res.bytes_downloaded
+            consolidated_rows += res.rows_parsed
+            # Schema hash must match across states for a single source.
+            # ECHO returns the same CSV column header set per state, so a
+            # mismatch indicates real schema drift — fail the whole run.
+            if consolidated_hash is None:
+                consolidated_hash = res.schema_hash
+            elif res.schema_hash and res.schema_hash != consolidated_hash:
+                fatal_err = (
+                    f"schema_hash mismatch across states: "
+                    f"{consolidated_hash[:12]} vs {res.schema_hash[:12]}"
                 )
+                break
+            if consolidated_http is None:
+                consolidated_http = res.http_status_download
+
+        if fatal_err:
+            raise RuntimeError(fatal_err)
+
+        sig_cur = conn.cursor()
+        try:
+            write_signature(
+                sig_cur,
+                source_id,
+                run_id,
+                http_status=consolidated_http,
+                byte_size=consolidated_bytes,
+                schema_hash=consolidated_hash,
+                row_count=consolidated_rows,
             )
+            finish_run(
+                sig_cur,
+                run_id,
+                "success",
+                rows_in=consolidated_rows,
+                rows_inserted=sum(r.rows_inserted for r in results),
+                rows_updated=sum(r.rows_updated for r in results),
+            )
+            conn.commit()
+        finally:
+            sig_cur.close()
+
+        print(
+            f"\n[run] consolidated signature: bytes={consolidated_bytes:,} "
+            f"rows={consolidated_rows:,} schema_hash={consolidated_hash[:12]}…",
+            flush=True,
+        )
+    except Exception as e:
+        fatal_err = fatal_err or str(e)
+        print(f"[run] FATAL: {fatal_err}", flush=True)
+        conn.rollback()
+        try:
+            err_cur = conn.cursor()
+            finish_run(
+                err_cur,
+                run_id,
+                "failed",
+                rows_in=consolidated_rows,
+                rows_inserted=sum(r.rows_inserted for r in results),
+                rows_updated=sum(r.rows_updated for r in results),
+                error_message=fatal_err,
+            )
+            conn.commit()
+            err_cur.close()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
     print("\n========== SUMMARY ==========")
-    fail = False
+    fail = bool(fatal_err)
     for r in results:
         status = "OK" if not r.error else "FAIL"
         print(
@@ -340,6 +394,10 @@ def main(states: list[str]) -> int:
             print(f"         error: {r.error}")
             fail = True
     return 1 if fail else 0
+
+
+def main(states: list[str]) -> int:
+    return run_all(states)
 
 
 if __name__ == "__main__":
