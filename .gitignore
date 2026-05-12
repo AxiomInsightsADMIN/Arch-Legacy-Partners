@@ -26,10 +26,13 @@ dist/
 htmlcov/
 .tox/
 
-# CSV exports (large, regenerable; do not commit by default)
+# CSV exports + drift report (large/transient, regenerable; do not commit
+# by default — the monthly refresh workflow force-adds them on the dated
+# refresh/YYYY-MM-DD branch for audit, but local runs leave them out).
 exports/*.csv
 exports/*.csv.gz
 exports/*.parquet
+exports/drift_report.json
 !exports/.gitkeep
 
 # Editor / OS
