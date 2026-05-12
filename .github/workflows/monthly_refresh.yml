@@ -1,17 +1,29 @@
 name: Monthly Refresh
 
-# Runs on the 1st of each month at 09:00 UTC (04:00 US/Central, 04:00 US/Eastern
-# winter — a sensible quiet hour for both client and operator). Also manually
-# triggerable for ad-hoc refresh testing.
+# Monthly cron: scrape all sources, run drift detection (gates the
+# canonical rebuild on no-drift), rebuild the resolver, re-export CSVs,
+# push to a dated refresh branch, and open a PR back to main for audit.
+# An email alert fires via ALERT_EMAIL on any step failure.
 #
-# This file is a STUB. Phase 5 (Days 10-11) wires in:
-#   - per-source loaders (federal, TX, NC, counties, discovery)
-#   - entity resolver run
-#   - LLM enrichment pass (budget-capped)
-#   - CSV export to facilities_primary.csv + facilities_provenance.csv
-#   - source-drift detection + alerting to ALERT_EMAIL
-# The schedule and the secrets surface are registered here today so the cron
-# is live the moment Phase-5 code lands and the secrets get populated.
+# Schedule: first of month at 09:00 UTC.
+#   UTC 09:00 = 04:00 US/Central (CST) / 03:00 US/Central (CDT)
+#   A sensible quiet hour for both client and operator.
+#
+# Manual trigger via workflow_dispatch is supported for ad-hoc refreshes
+# and post-failure re-runs.
+#
+# Manual-drop caveat (NC sources): the NC DEQ DWM sources (Solid Waste,
+# Septage Firm) require a manual XLSX drop into
+# local/manual_drops/<source>/ because edocs.deq.nc.gov network-blocks
+# Playwright. CI has no manual drops; those scrapers will fail in the
+# unattended cron. Operator playbook on NC scraper failure:
+#   1. Drop fresh NC XLSX locally
+#   2. Run `python -m scrapers.state.nc_deq_*` on the operator machine
+#      to upsert into Supabase
+#   3. workflow_dispatch this workflow to re-run; the NC scrapers will
+#      still fail in CI, BUT the downstream resolver + export operate on
+#      whatever raw_facility_record state exists in Supabase, so the
+#      manually-loaded NC data is picked up.
 
 on:
   schedule:
@@ -19,16 +31,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write          # push refresh branch
+  pull-requests: write     # open PR back to main
+
+env:
+  PYTHON_VERSION: "3.11"
 
 jobs:
 
   refresh:
-    name: Monthly refresh (stub — Phase 5 implementation pending)
+    name: Monthly refresh
     runs-on: ubuntu-latest
     env:
-      # External-service secrets. Phase-5 jobs read these. The names match
-      # the .env.example schema at the project root.
+      # External-service secrets. Names match .env.example at project root.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -40,18 +55,168 @@ jobs:
       SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
       ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+      # SMTP credentials for the email alert step. Populate before
+      # production cron use; without these, the alert step skips
+      # silently and the operator must monitor GitHub Actions directly.
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
 
     steps:
-      - name: Placeholder — Phase 5 will replace this step
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # need full history to branch off main
+
+      - name: Set refresh date
+        id: refresh_date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python dependencies
         run: |
-          echo "Monthly refresh stub. Workflow exists so the cron schedule"
-          echo "(0 9 1 * *) is registered with GitHub now. Phase 5 (Days 10-11)"
-          echo "replaces this step with the real load + resolve + enrich + export"
-          echo "pipeline."
-          echo ""
-          echo "Secrets presence (boolean — no values printed):"
-          test -n "${ANTHROPIC_API_KEY:-}"            && echo "  ANTHROPIC_API_KEY     : set" || echo "  ANTHROPIC_API_KEY     : UNSET"
-          test -n "${BRAVE_API_KEY:-}"                && echo "  BRAVE_API_KEY         : set" || echo "  BRAVE_API_KEY         : UNSET"
-          test -n "${SUPABASE_URL:-}"                 && echo "  SUPABASE_URL          : set" || echo "  SUPABASE_URL          : UNSET"
-          test -n "${SUPABASE_SERVICE_ROLE_KEY:-}"    && echo "  SUPABASE_SERVICE_ROLE : set" || echo "  SUPABASE_SERVICE_ROLE : UNSET"
-          test -n "${ALERT_EMAIL:-}"                  && echo "  ALERT_EMAIL           : set" || echo "  ALERT_EMAIL           : UNSET"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium
+
+      # ----- Federal scrapers (no manual-drop dependency) -----
+      - name: Scraper — EPA ECHO (federal)
+        run: python -m scrapers.federal.epa_echo
+
+      - name: Scraper — EPA CWNS 2022 (federal)
+        run: python -m scrapers.federal.epa_cwns
+
+      # ----- State scrapers -----
+      - name: Scraper — TCEQ MSW XLS (TX)
+        run: python -m scrapers.state.tceq_msw_xls
+
+      - name: Scraper — NC DEQ Non-Discharge (NC, ArcGIS)
+        run: python -m scrapers.state.nc_deq_non_discharge
+
+      # NC SW + NC SF require manual-drop XLSX (edocs.deq.nc.gov is WAF-
+      # blocked at the network layer). These steps will FAIL in CI; the
+      # operator runs them locally between cron failure and re-trigger.
+      # See operator playbook in the header comment.
+      - name: Scraper — NC DEQ Solid Waste (NC, manual-drop XLSX)
+        run: python -m scrapers.state.nc_deq_solid_waste
+
+      - name: Scraper — NC DEQ Septage Firm (NC, manual-drop XLSX)
+        run: python -m scrapers.state.nc_deq_septage_firm
+
+      # ----- Drift detection -----
+      # Gates the canonical rebuild. Per locked decision 8.7, any of:
+      #   HTTP non-200, row count drop >30%, schema_hash mismatch,
+      #   byte size delta >50%
+      # → exit non-zero and write exports/drift_report.json. A
+      # drift-paused source MUST NOT feed the resolver — that would
+      # poison canonical_facility with a partial / corrupted snapshot.
+      - name: Drift detector (orchestration/drift_detector.py)
+        run: python -m orchestration.drift_detector
+
+      # ----- Geocoder backfill -----
+      # Idempotent against geocoding_cache; only new (non-cached) NC SF +
+      # NC ND addresses cost Census API calls. Runs before the resolver
+      # so any newly-loaded NC rows have a chance at proximity-tiebreak
+      # merges in the canonical rebuild.
+      - name: Geocoder backfill (NC ND + NC SF)
+        run: python -m orchestration.geocoder_backfill
+
+      # ----- Canonical rebuild -----
+      - name: Resolver — full rebuild
+        run: python -m resolver.entity_resolver --rebuild --force
+
+      # ----- CSV export -----
+      - name: CSV export (primary + provenance)
+        run: python -m exports.export_csv
+
+      # ----- Commit refreshed CSVs to a dated branch -----
+      - name: Configure git for refresh branch
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Push refresh branch
+        id: refresh_branch
+        run: |
+          BRANCH="refresh/${{ steps.refresh_date.outputs.date }}"
+          git checkout -b "$BRANCH"
+          # CSVs are gitignored by default; force-add for the refresh branch.
+          git add -f exports/facilities_primary.csv exports/facilities_provenance.csv
+          if [ -f exports/drift_report.json ]; then
+            git add -f exports/drift_report.json
+          fi
+          git commit -m "Monthly refresh ${{ steps.refresh_date.outputs.date }}
+
+          Generated by .github/workflows/monthly_refresh.yml on the cron schedule.
+          Source counts and per-source drift status are visible in
+          exports/drift_report.json (committed when present). The CSVs reflect
+          the canonical state after the resolver rebuild completed."
+          git push -u origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      # ----- Open PR back to main for audit trail -----
+      - name: Open PR back to main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base main \
+            --head "${{ steps.refresh_branch.outputs.branch }}" \
+            --title "Monthly refresh ${{ steps.refresh_date.outputs.date }}" \
+            --body "$(cat <<'EOF'
+          Automated monthly refresh produced by `.github/workflows/monthly_refresh.yml`.
+
+          - Scrapers ran in order: EPA ECHO, EPA CWNS, TCEQ MSW, NC DEQ Non-Discharge, NC DEQ Solid Waste, NC DEQ Septage Firm.
+          - Drift detector gated the canonical rebuild — see `exports/drift_report.json` for per-source pass/pause status.
+          - Resolver re-ran with `--rebuild --force`, then the two CSVs (`facilities_primary.csv` + `facilities_provenance.csv`) were regenerated.
+
+          Review the diff against the previous month's refresh branch to confirm: row counts, new canonicals, any flagged drift.
+          EOF
+          )"
+
+      # ----- Email alert on any step failure -----
+      # Fires only when a prior step failed. Includes the workflow run URL
+      # so the operator can click through for the failing step name and
+      # the full log without needing the log shipped inline.
+      - name: Email alert on failure
+        if: failure() && env.SMTP_HOST != '' && env.ALERT_EMAIL != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ env.SMTP_HOST }}
+          server_port: ${{ env.SMTP_PORT }}
+          username: ${{ env.SMTP_USER }}
+          password: ${{ env.SMTP_PASSWORD }}
+          subject: "[Arch Legacy] Monthly refresh FAILED: ${{ steps.refresh_date.outputs.date }}"
+          to: ${{ env.ALERT_EMAIL }}
+          from: "Arch Legacy Refresh <${{ env.SMTP_USER }}>"
+          body: |
+            The monthly_refresh workflow failed on ${{ steps.refresh_date.outputs.date }}.
+
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Click through for the failing step name and the full log. If the
+            failure is in an NC scraper step (Solid Waste or Septage Firm),
+            the most common cause is that no manual XLSX drop is available
+            in CI — run those scrapers locally and re-trigger this workflow
+            via workflow_dispatch.
+
+      # Fallback alert when SMTP secrets are unset (early v1, before
+      # Ryan ships SMTP credentials). Always emits the run URL to the
+      # GitHub Actions log so the operator can spot the failure even
+      # without email.
+      - name: Failure summary (when SMTP unset)
+        if: failure() && (env.SMTP_HOST == '' || env.ALERT_EMAIL == '')
+        run: |
+          echo "::error title=Monthly refresh failed::Workflow run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "SMTP_HOST and/or ALERT_EMAIL are unset; email alert was skipped."
+          echo "Configure SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / ALERT_EMAIL"
+          echo "in repository secrets to enable the email-on-failure step."
+          exit 1
