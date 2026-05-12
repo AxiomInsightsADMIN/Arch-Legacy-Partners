@@ -6,6 +6,121 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 4 design notes (pin: residential-address-pattern filter for resolver)
+
+Captured BEFORE Phase 4 starts so the rule survives any gap between
+Phase 3 follow-ons and the Phase-4 enrichment pass (currently blocked
+on Austin's Anthropic API key delivery).
+
+### Background
+
+The Phase 5 item 1 CSV export spot-check (commit `9cf6a46`) surfaced
+the three most-merged typed canonicals, all of which are NC ND
+single-family-residence permits incorrectly merged with NC SF septage
+firms and ECHO discharge permits:
+
+| canonical id | name | facility_type | raws merged |
+|---|---|---|---:|
+| `6d6523d1...` | `2716 Weaver Hill Dr. SFR` | `private_regional_septage_facility` | 8 |
+| `ddd3777f...` | `1038 King Dr. SFR` | `private_regional_septage_facility` | 8 |
+| `711a4702...` | `72 Anfield Rd. SFR` | `private_regional_septage_facility` | 7 |
+
+NC DEQ's Non-Discharge permit list stores the residential address in
+the **FACILITY name field** (because there is no street column; the
+geometry was stripped for privacy in Phase 2 step 2). The current
+RapidFuzz score-based matcher treats those address strings as identity
+and merges:
+
+  - the NC ND residential permit ("972 New Elam Church Rd. SFR")
+  - any NC SF septage business operating at the same address
+  - ECHO industrial NPDES rows that happen to share the address-like
+    string in their CWPName
+
+into a single canonical_facility. That conflates the residential
+permit holder with the regulated hauler firm with the unrelated NPDES
+discharger, all under a `private_regional_septage_facility` type.
+
+### The bug, stated
+
+NC DEQ residential FACILITY values like `<number> <street> <suffix>`
+where suffix matches `SFR | SFW | residence | irrigation` (or
+similar) **must not participate in the cross-source fuzzy name-match
+pool**. They remain eligible for **ID-first matching only** (via
+`PERMITNUMBER`). Standalone canonicals are the correct outcome for
+residential permits — there is no business entity behind them.
+
+### Filter rule for Phase 4
+
+Before Phase 4 runs its first canonical-rebuild pass:
+
+1. **Detection regex** (preliminary; tune against the
+   `nc_deq_non_discharge_facilities` data before Phase 4 ships):
+
+   ```python
+   _SFR_PATTERN = re.compile(
+       r"^\s*\d+\s+.+?\s+"
+       r"(SFR|SFD|S\.F\.R\.|RESIDENCE|RESIDENTIAL|RES\.|SF[RW]?|HOME)"
+       r"\s*$",
+       re.IGNORECASE,
+   )
+   ```
+
+   Match against `raw_payload['FACILITY']` (or whatever the resolver's
+   normalized `name` is for `nc_deq_non_discharge_facilities` rows).
+   Cross-reference against `PERMIT_TYPE` — when
+   `PERMIT_TYPE='Single-Family Residence Wastewater Irrigation'`
+   (589 rows in current data), the regex match is high-confidence;
+   otherwise the regex still applies but with `confidence='medium'`
+   on the residential-filter decision.
+
+2. **Filter behavior** in the resolver score-match step
+   (`resolver/_score_match.py`):
+
+   - When `raw.source_slug == 'nc_deq_non_discharge_facilities'` AND
+     the name matches `_SFR_PATTERN`, **bypass score-based matching
+     entirely**.
+   - The raw still runs through `IdRegistry.lookup(raw)`. Standalone
+     canonical creation is the default outcome.
+   - Borderline cases (regex matches but `PERMIT_TYPE` does NOT carry
+     a residential signal) write to a Phase-4 review queue —
+     `discovery_review_queue` per the existing schema, with
+     `hold_reason='residential_filter_review'`.
+
+3. **Report contract** in the Phase 4 resolver-rebuild summary:
+   - `residential_filter_excluded`: rows skipped by the SFR filter
+   - `residential_filter_review`: rows held for Haiku adjudication
+   - Pre/post canonical count delta — expected drop of 8 to 20
+     canonicals as the over-merged ones split back into the
+     residential-permit-only canonicals plus the legitimate
+     non-residential canonicals they were over-merged with.
+
+### Tests to add alongside the filter
+
+- A unit test feeding sample residential `FACILITY` strings against
+  `_SFR_PATTERN`. Cover: pure SFR (`972 New Elam Church Rd. SFR`),
+  abbreviated (`2716 Weaver Hill Dr. SFR`), `RESIDENCE` suffix, and
+  negative controls (`Twelve Mile Creek WWTP`, `EMA Resources Class A
+  Residuals Program`, `Lloyds Portable Toilet Rentals`).
+- An integration test that re-runs the resolver against a tiny
+  synthetic raw_facility_record subset including 3 residential rows
+  and asserts they each get standalone canonicals.
+
+### Cross-reference
+
+This rule lives alongside the existing canonical-resolution filters
+documented in this file:
+
+- ID-first match precedence (locked decision 8.10)
+- CWPState ∈ {TX, NC} for ECHO
+- `Physical Site Status='NOT CONSTRUCTED'` exclusion for TCEQ MSW
+- HHW Collection exclusion for NC SW (`Activity='Collection'`)
+- **NEW: residential-address-pattern exclusion for NC ND** (this entry)
+
+Phase 4's resolver re-run reports against the pinned filter set; new
+filters require an entry here first.
+
+---
+
 ## 2026-05-12 — Phase 3 follow-on: resolver re-run after geocoder backfill
 
 Dedupe pass before Phase 4 enrichment. Census Geocoder backfill (commit
