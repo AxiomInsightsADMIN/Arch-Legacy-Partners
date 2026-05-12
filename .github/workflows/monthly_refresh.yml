@@ -102,14 +102,37 @@ jobs:
         run: python -m scrapers.state.nc_deq_non_discharge
 
       # NC SW + NC SF require manual-drop XLSX (edocs.deq.nc.gov is WAF-
-      # blocked at the network layer). These steps will FAIL in CI; the
-      # operator runs them locally between cron failure and re-trigger.
-      # See operator playbook in the header comment.
+      # blocked at the network layer). These two steps ALWAYS fail in CI
+      # because the runner filesystem has no manual XLSX. The
+      # continue-on-error toggle lets the workflow proceed past the
+      # expected failures; the verification gate after step 11 then
+      # confirms the operator ran these scrapers locally within the
+      # last 7 days. If the gate fails, the workflow halts BEFORE the
+      # resolver so stale NC data never poisons canonical_facility.
+      # Operator procedure for the manual drop:
+      # see docs/runbook_monthly_refresh.md section 5.
       - name: Scraper — NC DEQ Solid Waste (NC, manual-drop XLSX)
+        # Expected-failure in CI; gate below confirms operator already
+        # ran this locally within 7 days. See runbook §5.
+        continue-on-error: true
         run: python -m scrapers.state.nc_deq_solid_waste
 
       - name: Scraper — NC DEQ Septage Firm (NC, manual-drop XLSX)
+        # Expected-failure in CI; gate below confirms operator already
+        # ran this locally within 7 days. See runbook §5.
+        continue-on-error: true
         run: python -m scrapers.state.nc_deq_septage_firm
+
+      # ----- Manual-drop freshness gate -----
+      # Confirms BOTH NC manual-drop sources had a successful
+      # scraper_run within the last 7 days (the operator's local-machine
+      # path lands them in Supabase outside CI). If either is missing,
+      # exits non-zero with a runbook-pointer error message and halts
+      # the workflow before drift detection + resolver. This is the
+      # contract that lets the two scraper steps soft-fail above
+      # without poisoning canonical_facility with stale data.
+      - name: Verify NC manual-drop data present (gate before resolver)
+        run: python -m orchestration.verify_nc_manual_drop_freshness
 
       # ----- Drift detection -----
       # Gates the canonical rebuild. Per locked decision 8.7, any of:

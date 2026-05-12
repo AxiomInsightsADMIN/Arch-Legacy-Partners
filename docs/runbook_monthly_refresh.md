@@ -139,13 +139,15 @@ The scraper steps run in this order:
 | 10 | `scrapers.state.nc_deq_solid_waste` | **edocs WAF block (every run)**. See §5 below for the manual-drop workflow. |
 | 11 | `scrapers.state.nc_deq_septage_firm` | Same edocs WAF block as step 10. |
 
-**Step 10 + 11 fail in CI by design.** edocs.deq.nc.gov enforces a
-network-layer WAF block (verified across multiple cycles) and CI has
-no manual-drop XLSX in the runner filesystem. The pinned operational
-workaround is the **manual-drop fallback** documented in §5 — the
-operator runs those two scrapers from a workstation that has the
-manual XLSX local, then either skips the CI step or accepts the CI
-failure (the data is in Supabase by then either way).
+**Steps 10 + 11 always fail in CI** — edocs.deq.nc.gov enforces a
+network-layer WAF block and the runner filesystem has no manual XLSX.
+Both steps carry `continue-on-error: true` so the workflow proceeds
+past them. The freshness gate immediately after step 11
+(`orchestration.verify_nc_manual_drop_freshness`) then confirms that
+the operator already ran those two scrapers locally within the last
+7 days — if not, the workflow halts there with a runbook-pointer
+error before the resolver runs. The operator's local-drop procedure
+lives in §5 below.
 
 If you see a scraper failure on steps **6, 7, 8, or 9**, that's
 unexpected:
@@ -260,6 +262,35 @@ This procedure runs every month until edocs.deq.nc.gov stops blocking
 Playwright at the network layer (no ETA — the block has held since
 Phase 2 step 3, the load-bearing operational reality).
 
+### Workflow contract (current)
+
+The cron's two NC scraper steps (10 + 11) carry `continue-on-error: true`
+— they always fail in CI because the runner filesystem has no manual
+XLSX, but the workflow proceeds past them. Immediately after step 11,
+a freshness gate runs:
+
+```
+python -m orchestration.verify_nc_manual_drop_freshness
+```
+
+That gate queries Supabase for successful `scraper_run` rows on both
+NC manual-drop sources within the **last 7 days**. If either source
+is missing a recent run, the gate exits non-zero (halting the
+workflow before drift detection + resolver) with this exact message:
+
+```
+ERROR: Manual drop required for one or both NC sources within the last 7 days.
+  Missing successful scraper_run for: <slug>[, <slug>]
+  See docs/runbook_monthly_refresh.md section 5 for the operator procedure.
+  Re-trigger via workflow_dispatch after the manual drop completes.
+```
+
+When you see that message in the workflow log (or in the email alert
+body when SMTP is configured), follow the Step-by-step procedure
+below to drop the missing XLSX(s) and re-trigger. The gate halts
+**before** the resolver runs, so stale NC data never poisons
+`canonical_facility`.
+
 ### Step-by-step
 
 1. **On your workstation** (not in CI — CI has no manual drops), open
@@ -307,13 +338,12 @@ Phase 2 step 3, the load-bearing operational reality).
    ```
 
    The cron's NC SW + NC SF steps will fail in CI again (no manual
-   drops in the runner) — that's expected. The fix sequence is to
-   add `continue-on-error: true` to steps 10 + 11 of the workflow
-   YAML so the downstream drift-detector / resolver / export steps
-   run with the NC data that's already in Supabase from step 4 of
-   this procedure. **This change is escalate-first** because it
-   alters the workflow's failure semantics; bundle with the next
-   workflow-edit commit when other changes warrant.
+   drops in the runner) — that's **expected and absorbed** by their
+   `continue-on-error: true` flag. The freshness gate immediately
+   afterward will pass because step 4 of this procedure landed
+   successful scraper_runs in Supabase within the 7-day window.
+   The drift detector + resolver + CSV export then run normally and
+   the refresh PR opens.
 
 ### Alternative: full local refresh
 
