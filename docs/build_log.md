@@ -6,6 +6,126 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 3 follow-on: resolver re-run after geocoder backfill
+
+Dedupe pass before Phase 4 enrichment. Census Geocoder backfill (commit
+`b0cc7f4`) added coords for 602 high-confidence NC rows (525 NC SF +
+77 NC ND); resolver re-run via `--rebuild --force` (`--rebuild` flag
+shipped in commit `2a70d9d`) lets those rows participate in the 200m
+proximity tiebreak that was previously skipped for coord-less raws.
+
+**Headline comparison vs first pass (commit `de59e0d`)**
+
+| Metric | First pass | Re-run | Δ |
+|---|---:|---:|---:|
+| Total raws processed | 99,405 | 99,405 | 0 |
+| Filtered (excluded) | 297 | 297 | 0 |
+| **Canonical facilities** | **72,752** | **72,744** | **−8** |
+| Raws per canonical | 1.361 | 1.361 | ~0 |
+| Coords from geocoder cache | 0 | 602 | +602 |
+| Canonicals with non-null coords | ~70,840 | 71,442 | +602 |
+| NC SF tiebreak merges | 0 | 7 | +7 |
+| NC ND tiebreak merges | 0 | 1 | +1 |
+| NC SF hold-new-canonical | 620 | 613 | −7 |
+| NC ND hold-new-canonical | 1,034 | 1,033 | −1 |
+| field_provenance rows | 1,019,079 | 1,020,283 | +1,204 |
+| Elapsed | 332.7s | 339.2s | +6.5s |
+
+**Dedupe yield: 8 canonicals collapsed.** Modest, and that's the
+realistic ceiling given the input shape. NC SF rows are mostly
+distinct septage businesses; NC ND rows are mostly distinct
+non-discharge permits. The 8 collapsed cases are the rows that
+happened to share a name with a same-city canonical *and* land
+within 200m once coords were available. The geocoder backfill
+delivered exactly what it could deliver — Phase 4 enrichment is
+where the larger hold-new-canonical bucket gets revisited via
+Haiku adjudication, not via geocoding.
+
+**Source-by-source per-decision comparison**
+
+```
+                                          First pass    Re-run
+nc_deq_septage_firm_list
+  raws_seen                                      759       759
+  new_canonical                                  130       130
+  score_auto_merge                                 9         9
+  score_tiebreak_merge                             0         7   <-- gained
+  score_hold_new_canonical                       620       613   <-- shrunk by 7
+  coords_from_geocoder_cache                       0       525   <-- new
+nc_deq_non_discharge_facilities
+  raws_seen                                    1,259     1,259
+  score_auto_merge                               225       225
+  score_tiebreak_merge                             0         1   <-- gained
+  score_hold_new_canonical                     1,034     1,033   <-- shrunk by 1
+  coords_from_geocoder_cache                       0        77   <-- new
+```
+
+All other sources (epa_cwns_2022, epa_echo, tceq_msw_facilities_xls,
+nc_deq_solid_waste_facility_list) produced byte-identical decision
+counts to the first pass — they don't depend on NC SF/NC ND coords.
+
+**Canonical typed distribution change**
+
+```
+                                          First pass    Re-run    Δ
+private_regional_septage_facility              1,420     1,414    -6
+transfer_station                                 413       413     0
+composting_facility                              220       220     0
+land_application_site                            158       158     0
+potw_receiving_station                           124       124     0
+anaerobic_digester                                34        34     0
+NULL                                          70,383    70,381    -2
+typed total                                    2,369     2,363    -6
+```
+
+All 8 collapsed canonicals were on the NC side (NC SF dominant). 6 of
+them carried the `private_regional_septage_facility` type (NC SF
+contributing) and 2 were untyped (NC ND borderline rows).
+
+**Confidence filter on the geocoding cache**
+
+The resolver loads only `confidence='high'` entries from
+`geocoding_cache` (`597` rows). The 27 `confidence='low'` entries
+(Census returned coords that fell outside the NC state envelope —
+likely wrong-state street-name collisions) are deliberately excluded;
+using them would produce false-positive 200m matches against the
+wrong physical place. The `1,389` failed entries are skipped at the
+SQL filter level (lat/lng are NULL).
+
+**Idempotency observation**
+
+The `--rebuild --force` path TRUNCATEd 72,752 canonicals + 99,108
+links + 1,019,079 provenance rows + 0 history rows before resolving.
+TRUNCATE ... CASCADE follows the FK chain from `canonical_facility`
+so all four tables clear in a single statement.
+`raw_facility_record` is untouched — Phase 1+2 raw load fidelity is
+preserved across resolver re-runs.
+
+A second re-run (without backfill changes) would be byte-identical to
+this one because the resolver consumes deterministic inputs:
+`raw_facility_record` in `r.id` order, plus the cached geocoder
+results. Only UUIDs differ between runs (uuid4 minted at canonical
+creation time).
+
+**Open items unchanged from first pass**
+
+- 6 ID-first conflicts (ECHO NPDES vs FRS pointing to different
+  canonicals) — Phase 4 review
+- 70,381 NULL-facility_type canonicals (mostly ECHO industrial NPDES
+  outside the 7-category YAML scope) — filtered at CSV export, not
+  promoted unless Phase 4 acceptance-signal enrichment provides one
+- 0 `county_manhole_program` canonicals — Phase 4.5 discovery target
+- 61,594 hold-new-canonical rows in score range 75-91 (down from
+  61,602 first pass) — Phase 4 review surface
+
+**Pace check** — Phase 3 dedupe pass landed 2026-05-12 same day as
+the first pass. Brief expected us at roughly Phase 1 Day 2. Still
+running 3 brief-days ahead. Projection holds at May 16-18 internal
+completion vs Option C target May 29. Anthropic API key from Austin
+is the hard blocker on Phase 4.
+
+---
+
 ## 2026-05-12 — Phase 2 step 4 (NC DEQ Septage Firm loader via manual-drop XLSX)
 
 **Completed**
