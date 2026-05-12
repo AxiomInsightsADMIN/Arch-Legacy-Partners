@@ -93,14 +93,64 @@ def _load_raw_chunk(cur, source_slug: str, chunk_size: int = 5000):
         yield rows
 
 
-def run(*, dry_run: bool = False) -> dict:
-    """Main entrypoint. Returns a stats dict for the report."""
+REBUILD_SQL = """
+TRUNCATE canonical_facility,
+         facility_record_link,
+         field_provenance,
+         canonical_facility_history
+   CASCADE;
+"""
+
+
+def _rebuild_truncate(conn) -> dict[str, int]:
+    """Truncate the four resolver-owned tables. Returns row counts BEFORE
+    truncation so the caller can log what was wiped."""
+    cur = conn.cursor()
+    counts = {}
+    for tbl in (
+        "canonical_facility",
+        "facility_record_link",
+        "field_provenance",
+        "canonical_facility_history",
+    ):
+        cur.execute(f"SELECT COUNT(*) FROM {tbl}")
+        counts[tbl] = cur.fetchone()[0]
+    cur.execute(REBUILD_SQL)
+    conn.commit()
+    cur.close()
+    return counts
+
+
+def run(*, dry_run: bool = False, rebuild: bool = False) -> dict:
+    """Main entrypoint. Returns a stats dict for the report.
+
+    Args:
+        dry_run: when True, the pipeline runs in plan-only mode (no writes
+                 to canonical_facility / facility_record_link / field_provenance).
+        rebuild: when True, TRUNCATE the four resolver-owned tables before
+                 resolving. Caller is responsible for the --force gate; this
+                 function trusts the flag.
+    """
     started = time.time()
-    print(f"[resolver] starting full pass (dry_run={dry_run})", flush=True)
+    print(
+        f"[resolver] starting full pass (dry_run={dry_run}, rebuild={rebuild})",
+        flush=True,
+    )
 
     conn = db_connect()
     cur = conn.cursor()
     write_cur = conn.cursor()
+
+    if rebuild and not dry_run:
+        print("[resolver] --rebuild requested; truncating four tables...", flush=True)
+        wiped = _rebuild_truncate(conn)
+        for tbl, n in wiped.items():
+            print(f"[resolver]   wiped  {tbl:30s} {n:>10,} rows", flush=True)
+    elif rebuild and dry_run:
+        print(
+            "[resolver] --rebuild is a no-op under --dry-run (no writes happen anyway)",
+            flush=True,
+        )
 
     canonical_index = CanonicalIndex()
     id_registry = IdRegistry()
@@ -308,9 +358,37 @@ def main() -> int:
         action="store_true",
         help="Plan only; do not write canonical_facility / facility_record_link / field_provenance.",
     )
+    ap.add_argument(
+        "--rebuild",
+        action="store_true",
+        help=(
+            "Truncate canonical_facility, facility_record_link, field_provenance, "
+            "and canonical_facility_history before resolving. Required for "
+            "idempotent re-runs (the resolver mints fresh UUIDs each pass)."
+        ),
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Required confirmation when --rebuild is set. Without --force, "
+            "--rebuild errors out to prevent accidental data wipes."
+        ),
+    )
     args = ap.parse_args()
 
-    stats = run(dry_run=args.dry_run)
+    if args.rebuild and not args.force:
+        print(
+            "ERROR: --rebuild truncates canonical_facility, facility_record_link, "
+            "field_provenance, and canonical_facility_history.\n"
+            "       Pass --force to confirm. Without --force, the resolver refuses "
+            "to wipe data.\n"
+            "       Example:  python -m resolver.entity_resolver --rebuild --force",
+            file=sys.stderr,
+        )
+        return 2
+
+    stats = run(dry_run=args.dry_run, rebuild=args.rebuild)
 
     print("\n=== Run summary ===")
     print(f"  elapsed:        {stats['elapsed_sec']}s")
