@@ -1,13 +1,19 @@
-"""Tests for orchestration.geocoder — specifically the state-consistency
-warning policy (Checkpoint-2 decision A1.6). The Census Geocoder client
-itself is a Phase-1 stub and is exercised indirectly via the loaders."""
+"""Tests for orchestration.geocoder — state-consistency warning policy
+(Checkpoint-2 decision A1.6) plus the Phase-3 Census Geocoder client.
+
+The state-consistency tests run offline. The Census client tests stub out
+the HTTP call via monkeypatch so the unit suite never touches the network.
+End-to-end exercise of the live Census endpoint is covered by the resolver
+integration run, not by this file."""
 
 from __future__ import annotations
 
 import pytest
 
+from orchestration import geocoder as geo
 from orchestration.geocoder import (
     STATE_BOUNDS,
+    GeocoderResult,
     coords_consistent_with_state,
     geocode_with_state_check,
 )
@@ -87,12 +93,106 @@ class TestCoordsConsistentWithState:
         assert coords_consistent_with_state(lat=30.27, lng=-97.74, state="Tx") == "inside"
 
 
-class TestGeocodeWithStateCheckStub:
-    """`geocode_with_state_check` is a Phase-1 stub. It must raise
-    NotImplementedError with a non-empty message so callers fail loudly
-    rather than silently."""
+class TestGeocodeWithStateCheck:
+    """Phase-3 Census Geocoder client. HTTP is monkeypatched so these run
+    offline."""
 
-    def test_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError) as excinfo:
-            geocode_with_state_check(address="100 Congress Ave, Austin, TX", state="TX")
-        assert "Phase 1" in str(excinfo.value)
+    def _stub_census(self, monkeypatch, payload):
+        """Replace _call_census with a function that returns the given payload."""
+        monkeypatch.setattr(geo, "_call_census", lambda address: payload)
+
+    def test_match_inside_state(self, monkeypatch):
+        self._stub_census(
+            monkeypatch,
+            {
+                "result": {
+                    "addressMatches": [
+                        {
+                            "matchedAddress": "100 CONGRESS AVE, AUSTIN, TX, 78701",
+                            "coordinates": {"x": -97.7431, "y": 30.2672},
+                        }
+                    ]
+                }
+            },
+        )
+        result = geocode_with_state_check(
+            address="100 Congress Ave, Austin, TX", state="TX", conn=None
+        )
+        assert isinstance(result, GeocoderResult)
+        assert result.lat == 30.2672
+        assert result.lng == -97.7431
+        assert result.confidence == "high"
+        assert result.consistency == "inside"
+        assert result.review_flag is False
+        assert result.notes is None
+
+    def test_match_outside_state_downgrades(self, monkeypatch):
+        # NYC coords claimed to be in TX — should downgrade + review_flag.
+        self._stub_census(
+            monkeypatch,
+            {
+                "result": {
+                    "addressMatches": [
+                        {
+                            "matchedAddress": "200 W 34TH ST, NEW YORK, NY",
+                            "coordinates": {"x": -73.9857, "y": 40.7484},
+                        }
+                    ]
+                }
+            },
+        )
+        result = geocode_with_state_check(
+            address="200 W 34th St, Austin, TX", state="TX", conn=None
+        )
+        assert result.confidence == "low"
+        assert result.consistency == "outside"
+        assert result.review_flag is True
+        assert result.notes == "state_coord_mismatch"
+
+    def test_no_match_returns_failed(self, monkeypatch):
+        self._stub_census(monkeypatch, {"result": {"addressMatches": []}})
+        result = geocode_with_state_check(address="999 Nonexistent St", state="TX", conn=None)
+        assert result.lat is None
+        assert result.lng is None
+        assert result.confidence == "failed"
+        assert result.notes == "census_no_match"
+
+    def test_transport_error_returns_failed_uncached(self, monkeypatch):
+        self._stub_census(monkeypatch, None)
+        result = geocode_with_state_check(
+            address="100 Congress Ave, Austin, TX",
+            state="TX",
+            conn=None,
+            retries=0,
+        )
+        assert result.confidence == "failed"
+        assert result.notes == "census_transport_error"
+
+    def test_empty_address_short_circuits(self):
+        result = geocode_with_state_check(address="", state="TX", conn=None)
+        assert result.lat is None and result.lng is None
+        assert result.confidence == "failed"
+        assert result.notes == "empty_address"
+
+    def test_state_bounds_missing_marks_review(self, monkeypatch):
+        # CA coords w/ CA state — STATE_BOUNDS has no CA envelope yet.
+        self._stub_census(
+            monkeypatch,
+            {
+                "result": {
+                    "addressMatches": [
+                        {
+                            "matchedAddress": "1 INFINITE LOOP, CUPERTINO, CA",
+                            "coordinates": {"x": -122.0312, "y": 37.3318},
+                        }
+                    ]
+                }
+            },
+        )
+        result = geocode_with_state_check(
+            address="1 Infinite Loop, Cupertino, CA", state="CA", conn=None
+        )
+        assert result.confidence == "medium"
+        assert result.consistency == "unknown"
+        assert result.review_flag is True
+        assert result.notes == "state_bounds_missing"
