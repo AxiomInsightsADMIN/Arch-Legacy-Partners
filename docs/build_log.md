@@ -6,6 +6,81 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 6 design notes (pin: SMTP secrets handoff for monthly refresh alerts)
+
+Pinned now so the secret-set handoff isn't dropped between Phase 5
+(workflow lands) and Phase 6 (handoff docs draft). The Phase 5 item 2
+monthly refresh workflow at `.github/workflows/monthly_refresh.yml`
+ships with an email-alert-on-failure step gated on **four secrets that
+do not exist yet** in the repo's Actions secret set:
+
+| Secret | Purpose | Example value |
+|---|---|---|
+| `SMTP_HOST` | Outbound SMTP server hostname | `smtp.gmail.com` |
+| `SMTP_PORT` | SMTP port | `465` (SSL) or `587` (STARTTLS) |
+| `SMTP_USER` | SMTP auth username (usually the sending address) | `monthly-refresh@axiominsights.example` |
+| `SMTP_PASSWORD` | SMTP auth password / app password | (rotated per Phase 6 runbook) |
+
+Until these are configured, the alert step short-circuits (it has
+`if: failure() && env.SMTP_HOST != '' && env.ALERT_EMAIL != ''`) and
+the Failure-Summary step writes a `::error::` annotation to the
+GitHub Actions log instead. The cron still surfaces failures — just
+through the GitHub Actions UI rather than via email.
+
+### Recommended SMTP provider (cheapest path)
+
+**Gmail SMTP with an app password.**
+
+  - Free; works out of the box with `dawidd6/action-send-mail@v3`.
+  - Setup: 5 minutes. Enable 2-Step Verification on the sending
+    Google account → generate App Password labeled
+    `arch-legacy-monthly-refresh` →
+    paste into `SMTP_PASSWORD`. Username = the full Gmail address
+    of the sending account.
+  - Config: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, TLS implicit.
+  - Failure mode: Google enforces a 500/day cap on free Gmail SMTP,
+    which is far above the monthly cron's ~1 alert/month rate.
+    No deliverability issues against typical corporate inboxes.
+
+### Recommended paid alternatives (higher deliverability)
+
+If client requires SPF/DKIM/DMARC alignment with a vanity domain:
+
+- **Postmark** ($10/month transactional plan, $1.25 per 1k after).
+  Best-in-class transactional deliverability; well-tuned for cron
+  failure alerts that must not get flagged as spam.
+  `SMTP_HOST=smtp.postmarkapp.com`, port 587.
+- **SendGrid** ($19.95/month "Essentials"; free tier 100 emails/day
+  is sufficient for the monthly cron alone).
+  `SMTP_HOST=smtp.sendgrid.net`, port 587.
+
+Either Postmark or SendGrid drops in with the same four secrets — the
+workflow YAML is provider-agnostic. The choice is operator-domain
+(vanity-domain alignment) and budget, not technical.
+
+### Add to Phase 6 API-key rotation runbook
+
+The Phase 6 handoff doc must include the SMTP-secret setup steps in
+the same checklist as the Anthropic, Brave, and Supabase rotation
+procedures. Specifically:
+
+1. `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` go into
+   repo settings → Secrets and variables → Actions → new repository
+   secret.
+2. `ALERT_EMAIL` already exists; verify it's set to the operator's
+   monitoring inbox (not the SMTP_USER sending address — those are
+   typically different).
+3. Test the email path: trigger a `workflow_dispatch` run of the
+   monthly refresh workflow that intentionally fails on step 1
+   (e.g., by passing a bad env var). Confirm an email lands in the
+   ALERT_EMAIL inbox within 60 seconds.
+4. App-password rotation: 90-day cadence for Gmail (Google forces
+   re-issue on inactive accounts); 365-day for Postmark/SendGrid
+   API keys. Document the rotation calendar alongside Anthropic +
+   Brave + Supabase rotation entries.
+
+---
+
 ## 2026-05-12 — Phase 4 design notes (pin: residential-address-pattern filter for resolver)
 
 Captured BEFORE Phase 4 starts so the rule survives any gap between
