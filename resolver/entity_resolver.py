@@ -38,6 +38,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from orchestration.geocoder import _address_hash, _normalize_address  # noqa: E402
 from resolver._canonicalize import (  # noqa: E402
     CanonicalRowState,
     PendingLink,
@@ -51,7 +52,7 @@ from resolver._canonicalize import (  # noqa: E402
 from resolver._category_map import map_to_canonical  # noqa: E402
 from resolver._filters import EXCLUSION_REASONS, apply_filters  # noqa: E402
 from resolver._id_match import IdRegistry  # noqa: E402
-from resolver._normalize import normalize  # noqa: E402
+from resolver._normalize import normalize, synthesize_address_for_geocoding  # noqa: E402
 from resolver._score_match import (  # noqa: E402
     CandidateCanonical,
     CanonicalIndex,
@@ -100,6 +101,51 @@ TRUNCATE canonical_facility,
          canonical_facility_history
    CASCADE;
 """
+
+
+def _load_geocoding_cache(cur) -> dict[str, tuple[float, float, str]]:
+    """Pre-load `geocoding_cache` into a dict keyed by address_hash.
+
+    Filters to confidence='high' only. 'low' confidence entries are
+    state-mismatch coords (the geocoder returned a location outside the
+    facility's state envelope) and would produce false-positive proximity
+    matches against the wrong place. 'medium' confidence entries
+    (state_bounds_missing) don't occur for the NC backfill because the
+    NC envelope is defined; if a future state ships without an envelope,
+    extend STATE_BOUNDS first.
+    The resolver consults this dict at normalize-time for any raw that
+    has no native coords but does have a synthesizeable address.
+    """
+    cur.execute(
+        """
+        SELECT address_hash, lat, lng, confidence
+          FROM geocoding_cache
+         WHERE lat IS NOT NULL AND lng IS NOT NULL
+           AND confidence = 'high'
+        """
+    )
+    out: dict[str, tuple[float, float, str]] = {}
+    for ahash, lat, lng, conf in cur.fetchall():
+        out[ahash] = (float(lat), float(lng), conf)
+    return out
+
+
+def _enrich_coords_from_cache(raw, geocoding_lookup: dict) -> bool:
+    """If raw has no native coords and a synthesizeable address, fill in
+    coords from the geocoding cache. Returns True if coords were filled."""
+    if raw.latitude is not None and raw.longitude is not None:
+        return False
+    addr = synthesize_address_for_geocoding(raw)
+    if not addr:
+        return False
+    ahash = _address_hash(_normalize_address(addr))
+    hit = geocoding_lookup.get(ahash)
+    if hit is None:
+        return False
+    lat, lng, _conf = hit
+    raw.latitude = lat
+    raw.longitude = lng
+    return True
 
 
 def _rebuild_truncate(conn) -> dict[str, int]:
@@ -152,6 +198,14 @@ def run(*, dry_run: bool = False, rebuild: bool = False) -> dict:
             flush=True,
         )
 
+    # Pre-load geocoding_cache so we can enrich coord-less raws (NC ND, NC SF)
+    # at normalize-time. Lookup is O(1) on address_hash.
+    geocoding_lookup = _load_geocoding_cache(cur)
+    print(
+        f"[resolver] loaded {len(geocoding_lookup):,} entries from geocoding_cache",
+        flush=True,
+    )
+
     canonical_index = CanonicalIndex()
     id_registry = IdRegistry()
     canonical_state: dict[str, CanonicalRowState] = {}
@@ -200,6 +254,11 @@ def run(*, dry_run: bool = False, rebuild: bool = False) -> dict:
                     source_record_id=source_record_id,
                     raw_payload=raw_payload,
                 )
+
+                # Enrich missing coords from geocoding_cache (no-op when raw
+                # already has native coords or no address is synthesizeable).
+                if _enrich_coords_from_cache(raw, geocoding_lookup):
+                    stats[source_slug]["coords_from_geocoder_cache"] += 1
 
                 filt = apply_filters(raw)
                 if not filt.keep:

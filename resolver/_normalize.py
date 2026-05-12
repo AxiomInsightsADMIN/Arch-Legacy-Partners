@@ -331,3 +331,52 @@ def normalize(
             f"register it in NORMALIZERS."
         )
     return fn(raw_id, source_record_id, raw_payload)
+
+
+# ---------------------------------------------------------------------------
+# Geocoding address synthesis
+# ---------------------------------------------------------------------------
+# Shared helper used by the Census Geocoder backfill (one-time pass that
+# populates geocoding_cache) and by the resolver (looks up the same cache
+# at runtime when a raw has no native coords).
+#
+# Both must use the SAME string for a given raw so address_hash collides
+# on the cache lookup. Definition lives here, in the normalize module,
+# because it depends on the per-source address shape we already
+# understand.
+# ---------------------------------------------------------------------------
+
+
+def synthesize_address_for_geocoding(raw: NormalizedRaw) -> str | None:
+    """Produce the one-line address used by Census Geocoder for a given raw,
+    or None if the raw lacks sufficient address data.
+
+    The output is fed directly to `orchestration.geocoder.
+    geocode_with_state_check(address=..., state=raw.state, ...)`. The
+    `geocoder` module normalizes (trim/upper-case) and hashes the string
+    before caching; we don't need to pre-normalize here.
+
+    Source-specific shapes:
+      - NC SF:  "<street>, <city>, NC"   when both populated. The source's
+                `Address` column is "street; city" semicolon-delimited and
+                the normalizer already splits it into raw.street + raw.city.
+      - NC ND:  "<FACILITY>, <COUNTY>, NC"  when both populated. NC ND has
+                no street address column; the FACILITY name is often
+                address-like (e.g. '972 New Elam Church Rd. SFR' for
+                single-family-residence permits). Most won't match, but
+                the SFR rows have a decent shot.
+      - Other sources: not handled — they either already have native coords
+                or don't have a useful address to geocode.
+    """
+    if raw.source_slug == "nc_deq_septage_firm_list":
+        if raw.street and raw.city:
+            state = raw.state or "NC"
+            return f"{raw.street}, {raw.city}, {state}"
+        return None
+
+    if raw.source_slug == "nc_deq_non_discharge_facilities":
+        if raw.name and raw.county:
+            return f"{raw.name}, {raw.county}, NC"
+        return None
+
+    return None
