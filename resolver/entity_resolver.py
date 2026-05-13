@@ -53,6 +53,7 @@ from resolver._category_map import map_to_canonical  # noqa: E402
 from resolver._filters import EXCLUSION_REASONS, apply_filters  # noqa: E402
 from resolver._id_match import IdRegistry  # noqa: E402
 from resolver._normalize import normalize, synthesize_address_for_geocoding  # noqa: E402
+from resolver._residential_filter import check_residential  # noqa: E402
 from resolver._score_match import (  # noqa: E402
     CandidateCanonical,
     CanonicalIndex,
@@ -295,9 +296,29 @@ def run(*, dry_run: bool = False, rebuild: bool = False) -> dict:
                     match_score = None
                     stats[source_slug][f"id_match_{id_hit.matched_field}"] += 1
                 else:
-                    # 2) Score-based match
-                    score_result = find_best_match(raw=raw, index=canonical_index)
-                    if score_result.canonical_id is not None:
+                    # 2a) Residential-address-pattern filter (Phase 4 follow-on).
+                    # For NC ND rows whose FACILITY name matches the SFR
+                    # pattern, bypass the RapidFuzz score-based match entirely.
+                    # The raw still passed the ID-first lookup above; standalone
+                    # canonical creation is the correct outcome for residential
+                    # permits (they should NOT merge with NC SF septage
+                    # businesses or ECHO industrial NPDES rows at the same
+                    # address). See resolver/_residential_filter.py for the
+                    # pattern + decision rules.
+                    sfr = check_residential(raw)
+                    if sfr.matched:
+                        if sfr.high_confidence:
+                            stats[source_slug]["residential_filter_excluded"] += 1
+                        else:
+                            stats[source_slug]["residential_filter_review"] += 1
+                        # Synthetic "no merge" outcome to flow into the new-
+                        # canonical branch below without running score-based.
+                        score_result = None
+                    else:
+                        # 2b) Score-based match
+                        score_result = find_best_match(raw=raw, index=canonical_index)
+
+                    if score_result is not None and score_result.canonical_id is not None:
                         canonical_id = score_result.canonical_id
                         state = canonical_state[canonical_id]
                         state.merge_first_non_null(raw, state_permit=derive_state_permit_id(raw))
@@ -335,13 +356,20 @@ def run(*, dry_run: bool = False, rebuild: bool = False) -> dict:
                         )
                         # Always 'rapidfuzz' for non-ID matches per the CHECK
                         # constraint allowlist. Score is non-null if we actually
-                        # ran a comparison; null if the bucket was empty.
+                        # ran a comparison; null if the bucket was empty OR the
+                        # SFR filter bypassed score-based matching entirely.
                         match_method = "rapidfuzz"
-                        match_score = score_result.score if score_result.score > 0 else None
-                        if score_result.decision == "hold":
-                            stats[source_slug]["score_hold_new_canonical"] += 1
+                        if score_result is None:
+                            # SFR filter bypassed score-based matching. Stats
+                            # already incremented under residential_filter_*
+                            # above; nothing to add here.
+                            match_score = None
                         else:
-                            stats[source_slug]["new_canonical"] += 1
+                            match_score = score_result.score if score_result.score > 0 else None
+                            if score_result.decision == "hold":
+                                stats[source_slug]["score_hold_new_canonical"] += 1
+                            else:
+                                stats[source_slug]["new_canonical"] += 1
 
                 # Register IDs against the canonical (idempotent)
                 id_registry.register(raw, canonical_id)
