@@ -26,6 +26,17 @@ ignore = [
     "E501", # line length handled by formatter
 ]
 
+# Per-file ruff ignores. Use sparingly — each entry needs an in-line
+# justification.
+[tool.ruff.lint.per-file-ignores]
+# The Haiku enrichment prompt is content-hashed into llm_enrichment_cache
+# (see enrichment/_prompt.prompt_hash). Any textual change — including
+# typographical normalization of en-dash to hyphen-minus — invalidates
+# the entire v1.1.1 cache (~2,127 rows, ~$9 to re-run). The en-dashes in
+# the SYSTEM_PROMPT and the MAX_TOKENS comment are intentional and stable.
+"enrichment/_prompt.py" = ["RUF001"] # ambiguous EN DASH in prompt string
+"enrichment/_haiku.py" = ["RUF003"]  # ambiguous EN DASH in comment
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
