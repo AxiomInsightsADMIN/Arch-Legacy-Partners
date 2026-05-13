@@ -116,10 +116,32 @@ Expected: `Response: OK` plus a tiny usage block. If you get an
 ## 2. Brave Search API key (`BRAVE_API_KEY`)
 
 **Format:** alphanumeric, ~30 chars (no specific prefix).
-**Used by:** `scrapers/discovery/brave_search.py` (Phase 4.5; not
-yet built in v1).
-**Cost basis:** Brave's free tier covers ~1 query/sec at 2,000
-queries/month; paid tiers are pay-per-thousand.
+**Used by:** `enrichment/_brave.py` (Phase 4 acceptance-flag enrichment,
+~1,970 queries per monthly refresh against typed canonicals) and
+`scrapers/discovery/brave_search.py` (Phase 4.5 discovery crawl; budget
+TBD, currently estimated at 500–2,000 queries per refresh depending on
+discovery scope).
+**Cost basis:** **paid tier required.** Brave's free tier (~1,000
+queries/month) is exhausted within a single monthly refresh's Phase 4
+enrichment pass alone (~1,970 queries against the v1 typed-canonical
+set, plus Phase 4.5 discovery on top). The Phase 4 stop-4 calibration
+on 2026-05-13 burned through the Axiom-side free tier mid-run and the
+remainder of the pass returned `HTTP 402 Payment Required` until the
+account was upgraded.
+**Paid pricing model:** Brave Data for Search bills at ~$5 per 1,000
+queries with prepaid top-up tiers at $5 / $10 / $15 increments (verify
+current pricing at <https://api.search.brave.com/app/subscriptions>
+before each rotation, as Brave revises tiers). At current v1 data
+volume the monthly refresh budget is approximately **$5–15 per
+refresh** (Phase 4 enrichment ~$10 + Phase 4.5 discovery $0–5
+depending on scope).
+
+**Austin handoff note.** Brave free tier is **not** sufficient for this
+project's monthly cadence. Austin's day-1 Brave setup must subscribe to
+the paid tier (any prepaid top-up amount works; $15 covers ~3 months of
+refresh volume with headroom). Skipping this step will trip the same
+HTTP 402 wall Axiom hit during v1 build, with partial-completion
+results and an out-of-budget alert in the monthly-refresh runbook.
 
 ### Generate
 

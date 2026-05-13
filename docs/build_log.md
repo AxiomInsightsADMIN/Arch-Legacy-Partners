@@ -6,6 +6,177 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-14 — Phase 4 close: v1.1.1 enrichment full pass complete on 1,970 typed canonicals
+
+Headline: **1,742 affirmative answers and 43 explicit No commits** across
+the three acceptance flags on the v1 typed-canonical set, produced by
+Anthropic Haiku 4.5 reading Brave Search snippets under the v1.1.1
+prompt (prompt_hash `fad8e2f5c6354787` pinned). Anthropic cumulative
+spend $9.93 against the brief's $40 cap (**25% cap utilization**).
+Brave paid-tier upgrade landed mid-pass; one $15 top-up carries ~$8.50
+into Phase 4.5.
+
+### Per-field results on the 1,970-row pass
+
+| Field | Yes | No | Unknown | Commit rate |
+|---|---:|---:|---:|---:|
+| `accepts_septage` | 509 | 9 | 1,452 | 26.3% |
+| `accepts_grease_trap` | 233 | 25 | 1,712 | 13.1% |
+| `accepts_portable_toilet` | 236 | 9 | 1,725 | 12.4% |
+
+Highest-yield buckets: NC `private_regional_septage_facility` (985
+rows, 444 septage Yes / 45.1% commit rate) and TX
+`private_regional_septage_facility` (36 rows, 18 septage Yes / 50.0%).
+Transfer-station buckets show meaningful No commits (TX `transfer_station`
+returned 7 septage No / 6 grease No / 5 porta No), validating tuning 4's
+"explicit denial only" rule. Composting / land-application / POTW buckets
+show modest single-digit commit rates as expected — operator web text
+for those categories rarely names the three hauler-relevant waste types
+explicitly.
+
+### v1.1.1 calibration metrics (the gate that proceeded to full pass)
+
+Calibration on the 50-facility stratified sample (20 NC SF, 15 TX 5TS,
+15 TX 5RC) passed the 85% precision gate on all three fields:
+
+| Field | Precision | Recall |
+|---|---:|---:|
+| `accepts_septage` | 92.3% (12/13) | 70.6% (12/17) |
+| `accepts_grease_trap` | 85.7% (6/7) | 75.0% (6/8) |
+| `accepts_portable_toilet` | 90.0% (9/10) | 90.0% (9/10) |
+
+The v1.0.0 → v1.1.0 → v1.1.1 evolution closed three known failure
+modes from the v1.0.0 baseline: hallucinated denials (J-V DIRT case
+manufactured "we can't take other materials" from a truncated Brave
+snippet; fixed by the v1.1.1 anti-hallucination rule requiring literal
+quotations), business-model-incompatibility inferences (EVERGRO ORGANIC
+RECYCLING porta=No on "the service model is inconsistent with
+porta-pot pumping"; fixed by tuning 4's third example), and tool-call
+schema malformations (XML-style `<parameter name="value">` artifacts
+leaking into JSON values when MAX_TOKENS=500 truncated mid-tool-call;
+fixed by bumping to MAX_TOKENS=1000 and adding a worked JSON example
+to the prompt's OUTPUT FORMAT section). One ground-truth correction
+authorized in v1.1.1 calibration: PRO STAR WASTE
+`accepts_portable_toilet` flipped Unknown→Yes on operator quotation
+"portable toilet services for events."
+
+### 3-attempt stop-4 resilience postmortem
+
+Stop 4 took three attempts. Each failure mode was distinct, and the
+cache-as-durable-source-of-truth architecture preserved all work:
+
+1. **Attempt 1 — harness/host restart at ~19:11 UTC on 2026-05-13**
+   killed the python child at ~facility 760 of 1,970. Per-row
+   `llm_enrichment_cache` writes (`conn.commit()` after each Haiku
+   call in `enrichment/enrich.py`) preserved every verdict. The JSON
+   checkpoint had only 600 rows but the cache held 760. Zero data
+   loss; the cache is the source of truth, the JSON is the convenience
+   surface.
+
+2. **Attempt 2 — Brave Search free-tier HTTP 402 wall** at ~facility
+   82 of the resume run. The cache lookup architecture requires a
+   fresh Brave call before the content_hash can match, so the Brave
+   wall cascaded all 1,888 remaining facilities into
+   `brave_search_failed` errors. Zero new cache writes happened
+   because Haiku was never reached after Brave failure. The 808
+   v1.1.1 rows from attempts 1 + calibration survived. Ryan
+   authorized Brave paid-tier upgrade ($5 / 1,000 queries, $15
+   prepaid top-up).
+
+3. **Attempt 3 — clean completion on paid Brave** in 91.8 min wall
+   clock. 651 cache hits from the prior runs (some prior rows had
+   slightly different Brave snippets on re-query, causing
+   content_hash mismatch and forcing fresh Haiku calls — 1,319 of
+   1,970 facilities re-enriched, the rest cache-hit). Final v1.1.1
+   cache row count: 2,127.
+
+The two-layer resilience (per-row Supabase cache + per-100-row JSON
+checkpoint) behaved exactly as designed. The architectural decision
+to make the cache the durable artifact and the JSON the convenience
+surface paid off twice.
+
+### Documentation updates landed in this commit
+
+- `docs/runbook_key_rotation.md` §2 (Brave Search API key) — added
+  paid-tier requirement, the 2026-05-13 HTTP-402 event as the in-the-
+  record proof, $5/1,000 pricing model with $5/$10/$15 prepaid top-up
+  tiers, and an Austin handoff note specifying that day-1 Brave setup
+  must be paid tier.
+- `docs/v1_scope_limitations.md` new §6 (Monthly refresh operational
+  costs) — Brave paid-tier requirement framed as operational economics,
+  $5–15/refresh Brave budget, $10–15/refresh Anthropic budget,
+  combined ~$15–30/refresh at v1 data volume. Old §6 / §7 renumbered
+  to §7 / §8.
+
+### Files committed
+
+| Path | Status |
+|---|---|
+| `enrichment/__init__.py` | new |
+| `enrichment/_brave.py` | new |
+| `enrichment/_cache.py` | new |
+| `enrichment/_haiku.py` | new (MAX_TOKENS=1000) |
+| `enrichment/_prompt.py` | new (PROMPT_VERSION="v1.1.1") |
+| `enrichment/enrich.py` | new |
+| `enrichment/.gitkeep` | removed (real files exist now) |
+| `docs/runbook_key_rotation.md` | modified §2 |
+| `docs/v1_scope_limitations.md` | new §6, renumbered §7 / §8 |
+| `docs/build_log.md` | this entry |
+
+### Files NOT in this commit (intentional)
+
+Calibration and stop-4 artifacts at `local/_calibration_*` and
+`local/_stop4_*` are gitignored. They are the audit trail for the
+calibration / full-pass run and remain on disk for reproducibility.
+The durable artifact is the `llm_enrichment_cache` table in Supabase
+(2,127 v1.1.1 rows, prompt_hash `fad8e2f5c6354787`).
+
+### Cumulative cost vs. cap
+
+| Line | Spend |
+|---|---:|
+| v1.0.0 calibration | $0.134 |
+| v1.1.0 calibration | $0.157 |
+| v1.1.1 calibration | $0.170 |
+| Stop 4 attempt 1 (harness-killed) | $2.39 |
+| Stop 4 attempt 2 (Brave 402) | $0.339 |
+| Stop 4 attempt 3 (paid Brave clean run) | $6.74 |
+| **Anthropic cumulative** | **$9.93** |
+| **Anthropic brief cap** | **$40.00** |
+| **Utilization** | **24.8%** |
+| Brave paid-tier (one $15 top-up) | $6.50 used / $8.50 remaining |
+
+### What proceeds next
+
+Phase 4.5 discovery crawl, scoped per Ryan's directive: priority
+targets `county_manhole_program` (0 canonicals), TX
+`private_regional_septage_facility` (current 36, expected many more),
+TX `land_application_site` (current 0 typed), NC `anaerobic_digester`
+(current 0). Build sequence A → B → C → D → E with stop-and-report at
+each checkpoint. Total Phase 4.5 cost cap: $20 incremental
+(Brave + Haiku). Acceptance-flag enrichment for discovery-sourced
+facilities is OUT of Phase 4.5 scope; runs in the monthly refresh
+after the canonical is approved into scope.
+
+### Deviations from the brief
+
+- Brief's Phase 4 cost projection was ~$5.50 for the full pass;
+  actual was $6.74 because v1.1.1's longer prompt produced more
+  input tokens per call (3,300–3,500 input tokens vs. ~2,100 under
+  v1.0.0). Still well under the $40 cap; no scope impact.
+- Brief assumed Brave free tier was sufficient; it was not. The
+  2026-05-13 HTTP 402 event drove the paid-tier upgrade documented
+  in `docs/runbook_key_rotation.md` §2 and
+  `docs/v1_scope_limitations.md` §6. Net incremental cost ~$6.50
+  one-time + ongoing $5–15/refresh.
+- Stop 4 took 3 attempts (harness restart, Brave free-tier wall,
+  clean paid-Brave run). Total stop-4 wall clock ~154 min vs. the
+  ~100 min single-shot estimate. Cumulative project pace is still
+  4+ brief-days ahead of the May 16–18 internal projection vs.
+  Option C target May 29.
+
+---
+
 ## 2026-05-13 — Phase 4 follow-on: SFR residential permits cleared to NULL facility_type (out of scope for hauler-disposal queries)
 
 Decision after the Phase 4 stop 2 re-run surfaced that SFR-filtered

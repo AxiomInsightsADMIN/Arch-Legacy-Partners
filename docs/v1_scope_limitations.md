@@ -288,7 +288,47 @@ states.** Each state's audit is its own document.
 
 ---
 
-## 6. Forward roadmap (out of v1 scope)
+## 6. Monthly refresh operational costs (Brave + Anthropic)
+
+This section is operational economics, not a coverage limitation — but
+the client needs the number in front of them so that monthly-refresh
+budgeting is honest.
+
+**Brave Search API: paid tier required.** Phase 4 acceptance-flag
+enrichment runs ~1,970 Brave queries per monthly refresh against the
+typed-canonical set (one query per facility). The free tier
+(~1,000 queries/month, Brave Data for Search) is exhausted before a
+single refresh completes, returning `HTTP 402 Payment Required` for
+all subsequent calls. This was first observed during Phase 4 stop-4
+calibration on 2026-05-13 and is documented in
+`docs/runbook_key_rotation.md` §2. **Estimated monthly Brave budget at
+current v1 data volume: $5–15 per refresh** ($10 for Phase 4
+enrichment at ~$5/1,000 queries, plus $0–5 for Phase 4.5 discovery
+crawl depending on scope). Prepaid top-ups at the $5 / $10 / $15
+tiers cover 1–3 refresh cycles.
+
+**Anthropic Haiku: pay-per-token, well under $40/refresh.** Phase 4
+enrichment on 1,970 facilities cost ~$5–7 in Haiku tokens during the
+stop-4 calibration. Plus calibration overhead (~$0.50 across three
+prompt versions) and any Phase 4.5 extraction. **Estimated monthly
+Anthropic budget: $10–15 per refresh** with comfortable headroom
+inside the original $40/refresh brief cap.
+
+**Combined monthly operational cost: approximately $15–30 per
+refresh.** This is the floor; volume growth (Austin adds new states
+post-v1) scales linearly. A 4-state expansion (Texas + NC + two new
+states) would roughly double the cost to ~$30–60/refresh.
+
+**Cost growth signals to monitor.** Sudden cost spikes ahead of
+linear-volume expectation typically indicate one of: cache
+invalidation from a prompt version bump (expected), Brave API tier
+change, Anthropic model price change, or a discovery crawl scope
+expansion. The monthly refresh runbook's cost-tracking step surfaces
+these in the refresh PR description.
+
+---
+
+## 7. Forward roadmap (out of v1 scope)
 
 These items are out of v1 scope but worth noting so the client knows
 the gap is not permanent:
@@ -310,7 +350,7 @@ the gap is not permanent:
 
 ---
 
-## 7. Audit trail
+## 8. Audit trail
 
 This document is the canonical reference for the items above. The
 chronology lives in `docs/build_log.md`. The TCEQ audit detail lives
