@@ -8,6 +8,15 @@ table's UNIQUE (url, source_category, state) constraint handles
 persistent cross-query dedup; in-memory dedup within a single Brave
 response prevents wasted INSERT attempts.
 
+Initial row state on insert:
+  fetch_status         = 'pending'   (schema default; URL not yet fetched)
+  classified_relevance = NULL        (set later by step C extraction)
+  content_hash         = NULL        (set later by step C after fetch)
+  fetched_at           = NULL        (set later by step C after fetch)
+
+Step C (scrapers/discovery/extraction.py) advances fetch_status from
+'pending' to 'fetched' / 'failed' and fills the other fields.
+
 Operational parameters (from Ryan's step-B brief):
   - Hard Brave cost cap at $5 (estimated as queries x $0.005). On
     breach, the loop exits cleanly and reports the partial state.
