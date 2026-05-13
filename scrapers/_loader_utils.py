@@ -20,7 +20,8 @@ import psycopg2
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+# override=True: .env is canonical, ignore empty or stale shell pre-sets.
+load_dotenv(ROOT / ".env", override=True)
 
 
 # --------------------------------------------------------------------------
