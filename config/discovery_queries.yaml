@@ -1,0 +1,239 @@
+# =============================================================================
+# discovery_queries.yaml
+# Arch Legacy Partners — Wastewater Facility Database
+# Phase 4.5 discovery crawl: bounded query template library.
+#
+# Each category in this file enumerates Brave Search query templates that
+# target a specific gap category from docs/v1_scope_limitations.md. The
+# Phase 4.5 harvester (scrapers/discovery/discovery_crawl.py) walks every
+# (category, state, template) tuple, runs the Brave query, harvests the
+# top N URLs into the discovered_url table, dedupes by URL hash, and
+# stops when the per-phase Brave budget cap is hit.
+#
+# Template syntax:
+#   {state}      — full state name (e.g. "Texas", "North Carolina").
+#                  Resolved from target_states per category at harvest time.
+#
+# Budget math:
+#   Each template × each entry in target_states = 1 Brave query.
+#   At Brave Data for Search paid pricing (~$0.005 / query) and ~140
+#   templates across 4 categories with single- or dual-state targets,
+#   the harvest phase budget projects to well under the $5 cap. See
+#   docs/build_log.md 2026-05-14 Phase 4 close entry for the cost frame.
+#
+# Acceptance-flag enrichment for discovered facilities is OUT of Phase 4.5
+# scope. Discovery surfaces the facility; acceptance posture is run in
+# the monthly refresh after the canonical is approved into v_all_in_scope.
+#
+# Edit rules:
+# - Templates should be diverse (regional, business-style, regulatory)
+#   to maximize unique URL surface; near-duplicates waste Brave budget.
+# - Templates that hard-code a state name (e.g. "Texas") are allowed
+#   when the category's target_states is a single state; the {state}
+#   parameter is then redundant but kept for harvester uniformity.
+# - When a category has multiple target_states, use {state} consistently
+#   so the harvester can expand across all targets without per-state
+#   duplication in this file.
+# =============================================================================
+
+version: "0.1.0"
+last_updated: "2026-05-14"
+authored_by: "Axiom Insights"
+
+# State-name lookup used by the harvester. {state} placeholder in
+# templates is resolved through this table at harvest time.
+states:
+  TX: "Texas"
+  NC: "North Carolina"
+
+categories:
+
+  # ---------------------------------------------------------------------------
+  county_manhole_program:
+    description: >-
+      County- or municipal-level publicly accessible disposal programs that
+      let licensed septage haulers discharge into a fixed receiving point
+      (manhole, POTW septage station, municipal sanitation dump site).
+      Gap category — 0 canonical rows in v1 because these programs are
+      not in any state registry; they live on county environmental-health
+      and city public-works pages.
+    target_states: [TX, NC]
+    templates:
+      - "{state} county manhole disposal program"
+      - "{state} septage hauler manhole dumping"
+      - "{state} POTW receiving station hauler"
+      - "{state} septic pumper authorized discharge site"
+      - "{state} wastewater treatment plant septage receiving"
+      - "{state} county septage drop off"
+      - "{state} municipal septage receiving"
+      - "{state} county wastewater authority septage"
+      - "{state} septage discharge facility county"
+      - "{state} hauler waste disposal city county"
+      - "{state} septage handling program county"
+      - "{state} county environmental health septage program"
+      - "{state} septage land application county program"
+      - "{state} septage permit county"
+      - "{state} POTW septage acceptance hauler"
+      - "{state} city septage dump station"
+      - "{state} city wastewater septage program"
+      - "{state} sanitation district septage"
+      - "{state} water utility septage receiving"
+      - "{state} county sewer authority hauler discharge"
+      - "{state} septage permit county environmental"
+      - "{state} county septage hauler list"
+      - "{state} septage manifest disposal site"
+      - "{state} county wastewater septage drop site"
+      - "{state} water reclamation facility septage receiving"
+      - "{state} grease trap waste disposal site county"
+      - "{state} county composting biosolids program"
+      - "{state} domestic septage land application county"
+      - "{state} sewer connection septage hauler"
+      - "{state} city public works septage receiving"
+      - "{state} county sludge land application site"
+      - "{state} wastewater utility hauler dumping"
+      - "{state} hauler permit county environmental health"
+      - "{state} septage receiving authorized site"
+      - "{state} county septic system disposal program"
+
+  # ---------------------------------------------------------------------------
+  tx_private_regional_septage:
+    description: >-
+      Texas private / regional septage facilities — haulers, transporters,
+      pumping operators, sludge transport companies. Current TX SF
+      canonicals=36; TCEQ Sludge Transporter registry is robots-disallowed
+      (CRPUB host) so the true population is expected to be many multiples
+      higher. Discovery uses Brave Search + Haiku extraction to surface
+      operator websites, BBB profiles, Yellow Pages listings, and trade
+      directories.
+    target_states: [TX]
+    templates:
+      - "{state} septic tank pumping service"
+      - "{state} septic tank pumper directory"
+      - "{state} septage transporter company"
+      - "{state} portable toilet service company"
+      - "{state} grease trap pumping company"
+      - "{state} wastewater hauler list"
+      - "{state} commercial septic service"
+      - "{state} residential septic pumping"
+      - "{state} septic cleaning contractor"
+      - "{state} Class B biosolids hauler"
+      - "{state} sludge transporter company"
+      - "{state} septic emergency service"
+      - "{state} sanitation hauler company"
+      - "{state} portable restroom rental septic"
+      - "{state} dairy waste hauler"
+      - "{state} industrial wastewater hauler"
+      - "{state} commercial grease trap service"
+      - "{state} restaurant grease trap pumping"
+      - "{state} FOG hauler company"
+      - "{state} environmental waste services septage"
+      - "Houston septic tank service company"
+      - "Dallas septic tank pumping"
+      - "Austin {state} septic service"
+      - "San Antonio septic pumping company"
+      - "Fort Worth septic tank service"
+      - "El Paso septic pumping"
+      - "{state} RV waste dump station hauler"
+      - "{state} portable sanitation services"
+      - "{state} vacuum truck septic service"
+      - "{state} private septage facility"
+      - "{state} regional septage facility list"
+      - "{state} authorized septage transporter"
+      - "{state} septic pumping operator registered"
+      - "{state} septic firm directory list"
+      - "{state} TCEQ registered septage hauler"
+
+  # ---------------------------------------------------------------------------
+  tx_land_application_site:
+    description: >-
+      Texas land application sites — Class B biosolids, Class A biosolids,
+      and Domestic Septage application registrations. Current TX typed=0
+      because TCEQ's Sludge and Biosolids program registry lives on the
+      robots-disallowed CRPUB host. Discovery targets operator-facing
+      pages, agricultural-reuse program descriptions, and county-level
+      land-application permit lookups.
+    target_states: [TX]
+    templates:
+      - "{state} Class B biosolids land application site"
+      - "{state} Class A biosolids facility"
+      - "{state} domestic septage land application registration"
+      - "{state} land application permit septage"
+      - "{state} biosolids land application program"
+      - "{state} sludge land application site"
+      - "{state} residual solids land application"
+      - "{state} dairy waste land application"
+      - "{state} swine waste land application"
+      - "{state} poultry litter land application"
+      - "{state} crop fertilizer biosolids"
+      - "{state} municipal biosolids land applier"
+      - "{state} land application beneficial reuse"
+      - "{state} biosolids application farm"
+      - "{state} Class A EQ biosolids"
+      - "{state} Class B sludge applier"
+      - "{state} land application registration septage"
+      - "{state} biosolids hauler land application"
+      - "{state} TCEQ biosolids site"
+      - "{state} septage land application farm"
+      - "{state} land applier biosolids permit"
+      - "{state} grease trap waste land application"
+      - "{state} sludge land application facility list"
+      - "{state} POTW biosolids land application"
+      - "{state} wastewater treatment plant biosolids reuse"
+      - "{state} farm spread biosolids"
+      - "{state} land application food processing waste"
+      - "{state} regional biosolids program"
+      - "{state} land application Class B Domestic Septage"
+      - "{state} commercial biosolids land applier"
+      - "{state} sludge agricultural use"
+      - "{state} centralized waste treatment land application"
+      - "{state} processing waste land application"
+      - "{state} biosolids site county registry"
+      - "{state} land application beneficial use farm"
+
+  # ---------------------------------------------------------------------------
+  nc_anaerobic_digester:
+    description: >-
+      North Carolina anaerobic digester facilities — biogas / RNG / dairy /
+      swine / food-waste digesters. Current NC canonicals=0. NC DEQ
+      Solid Waste registry covers some beneficial-gas-recovery permits
+      but the edocs.deq.nc.gov repository is network-gated
+      (docs/v1_scope_limitations.md §4). Discovery surfaces operator
+      sites, NC RNG project pages, NC State Energy program directories,
+      and farm-bioenergy program listings.
+    target_states: [NC]
+    templates:
+      - "{state} anaerobic digester facility"
+      - "{state} anaerobic digestion plant"
+      - "{state} biogas facility"
+      - "{state} RNG renewable natural gas facility"
+      - "{state} dairy anaerobic digester"
+      - "{state} swine waste anaerobic digester"
+      - "{state} livestock biogas operator"
+      - "{state} poultry anaerobic digestion"
+      - "{state} food waste digester facility"
+      - "{state} municipal wastewater biogas"
+      - "{state} POTW anaerobic digester"
+      - "{state} biomethane facility"
+      - "{state} waste to energy anaerobic digestion"
+      - "{state} landfill gas to energy plant"
+      - "{state} swine farm biogas project"
+      - "{state} agricultural digester operator"
+      - "{state} farm methane capture"
+      - "{state} commercial anaerobic digester"
+      - "{state} anaerobic digestion permit"
+      - "{state} biogas project list"
+      - "{state} dairy farm digester"
+      - "{state} biosolids anaerobic digestion"
+      - "{state} waste digester operator"
+      - "{state} RNG project pipeline"
+      - "{state} anaerobic digestion company"
+      - "{state} organics anaerobic digester"
+      - "{state} anaerobic digester construction project"
+      - "{state} anaerobic codigestion facility"
+      - "{state} manure biogas project"
+      - "{state} anaerobic digester operator directory"
+      - "{state} wastewater treatment plant digester"
+      - "{state} poultry litter to energy facility"
+      - "{state} industrial biogas facility"
+      - "{state} biomass anaerobic processor"
+      - "{state} anaerobic digester developer firm"
