@@ -6,6 +6,56 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-12 — Phase 4 stop 1: ANTHROPIC_API_KEY verification PASSED
+
+Austin's Anthropic API key arrived. Smoke test exercised the production
+loader path (`scrapers/_loader_utils.load_dotenv(..., override=True)`
+per the Fix B follow-on at commit `b1f4aff`) and reached Anthropic Haiku
+4.5 cleanly.
+
+**Verification result:**
+
+```
+OK shape: ANTHROPIC_API_KEY starts with 'sk-ant-', length=108, last-4='-AAA'
+
+=== Anthropic Haiku smoke test PASSED ===
+  model:         claude-haiku-4-5-20251001
+  request_id:    msg_019EYBvt31An3t3iT5HttVys
+  stop_reason:   end_turn
+  response text: 'OK'
+  usage:         input_tokens=17  output_tokens=4
+```
+
+**Path to verification:**
+
+Three error modes surfaced and resolved during stop-1:
+
+1. **First failure** — `ANTHROPIC_API_KEY` absent from `.env`. Austin
+   had installed the key in his local `.env` + the GitHub Actions
+   repo secret, but this checkout's `.env` was never updated.
+2. **Second failure** — `.env` updated but with the value pasted on
+   its own line without the `ANTHROPIC_API_KEY=` variable-name
+   prefix. python-dotenv silently ignored the no-`=` line.
+3. **Third failure mode (architectural)** — `.env` correctly
+   formatted; parent shell had `ANTHROPIC_API_KEY=""` pre-exported;
+   `load_dotenv(..., override=False)` (default) refused to overwrite
+   the empty-string env var with the `.env` value. Authorized Fix B:
+   changed `scrapers/_loader_utils.py:23` to `override=True` so
+   `.env` is canonical by code, not by convention. Spot-verified
+   with an ECHO loader re-run (scraper_run id=13, 0 inserted / 0
+   updated / 92,326 unchanged) — no regression.
+
+Smoke test now imports `scrapers._loader_utils` for its side-effect
+`load_dotenv(override=True)` rather than calling load_dotenv directly.
+This exercises the SAME credential-load path the production loaders
++ Phase 4 enrichment use, so a passing smoke test guarantees the
+downstream code path works.
+
+Proceeding to Phase 4 stop 2 (residential-address-pattern filter for
+NC ND) per the Phase 4 design pin at commit `b18283b`.
+
+---
+
 ## 2026-05-12 — Phase 5 follow-on: federal loaders consolidate state slices into single source_signature per refresh; historical per-state signatures cleaned up
 
 The Phase 5 item 3 drift detector test surfaced a pre-existing flaw in
