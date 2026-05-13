@@ -306,6 +306,7 @@ def run(*, dry_run: bool = False, rebuild: bool = False) -> dict:
                     # address). See resolver/_residential_filter.py for the
                     # pattern + decision rules.
                     sfr = check_residential(raw)
+                    sfr_matched_this_raw = sfr.matched
                     if sfr.matched:
                         if sfr.high_confidence:
                             stats[source_slug]["residential_filter_excluded"] += 1
@@ -340,7 +341,18 @@ def run(*, dry_run: bool = False, rebuild: bool = False) -> dict:
                         canonical_id = new_canonical_id()
                         state = CanonicalRowState(canonical_id=canonical_id)
                         state.merge_first_non_null(raw, state_permit=derive_state_permit_id(raw))
-                        if cat.canonical_type:
+                        # Phase 4 follow-on: SFR residential permits land as
+                        # NULL facility_type. Residential wastewater-irrigation
+                        # systems are not hauler-disposal sites — they should
+                        # not appear in v_nc_private_regional_septage_facility
+                        # or v_all_in_scope. Raw payload is still preserved on
+                        # raw_facility_record; the canonical type is the
+                        # consumer-facing "this is hauler-relevant" assertion,
+                        # which residential systems fail. Same NULL-out-of-scope
+                        # pattern we use for the ~70K ECHO industrial NPDES rows.
+                        # See docs/build_log.md Phase 4 design pin for the
+                        # recorded correction on this mechanic.
+                        if cat.canonical_type and not sfr_matched_this_raw:
                             state.facility_type = cat.canonical_type
                             state.dirty = True
                         canonical_state[canonical_id] = state

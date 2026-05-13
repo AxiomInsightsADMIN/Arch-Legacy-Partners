@@ -6,6 +6,112 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-13 — Phase 4 follow-on: SFR residential permits cleared to NULL facility_type (out of scope for hauler-disposal queries)
+
+Decision after the Phase 4 stop 2 re-run surfaced that SFR-filtered
+residential permits were still carrying `facility_type` values
+(mostly `private_regional_septage_facility` via the NC ND
+`wastewater irrigation` PERMIT_TYPE substring override, plus 5
+typed as `potw_receiving_station` via the `reclaimed water`
+substring rule for the medium-confidence borderline rows).
+Residential wastewater-irrigation systems are not hauler-disposal
+sites — they should not appear in `v_nc_private_regional_septage_facility`,
+`v_nc_potw_receiving_station`, or `v_all_in_scope`.
+
+### Decision
+
+Clear `canonical_facility.facility_type` to NULL on **any raw that
+the SFR filter matched**, regardless of whether the
+`raw_facility_type_string` would otherwise have triggered a category
+mapping. This is the same NULL-out-of-scope pattern we use for the
+~70,000 ECHO industrial NPDES rows that don't map to any of the 7
+v1 categories.
+
+**The raw payload is still preserved on `raw_facility_record`** —
+the canonical type is the consumer-facing assertion that this is
+hauler-relevant, not a record of source data. Phase 4 Haiku
+enrichment can still inspect the raw payload if a future business
+question needs the permit-type signal.
+
+### Code change
+
+`resolver/entity_resolver.py` main loop, in the new-canonical
+creation branch:
+
+```python
+# Phase 4 follow-on: SFR residential permits land as NULL
+# facility_type. ... Same NULL-out-of-scope pattern we use for the
+# ~70K ECHO industrial NPDES rows.
+if cat.canonical_type and not sfr_matched_this_raw:
+    state.facility_type = cat.canonical_type
+    state.dirty = True
+```
+
+### Measured outcome (post-rebuild)
+
+| Metric | Pre-NULL | Post-NULL | Δ |
+|---|---:|---:|---:|
+| `canonical_facility` rows | 72,913 | 72,913 | 0 |
+| NULL facility_type | 70,381 | **70,943** | **+562** |
+| `private_regional_septage_facility` | 1,583 | **1,026** | **−557** |
+| `potw_receiving_station` | 124 | **119** | **−5** |
+| `transfer_station` | 413 | 413 | 0 |
+| `composting_facility` | 220 | 220 | 0 |
+| `land_application_site` | 158 | 158 | 0 |
+| `anaerobic_digester` | 34 | 34 | 0 |
+| `v_all_in_scope` | 2,532 | **1,970** | **−562** |
+| `v_nc_in_scope` | 1,806 | **1,413** | **−393** ← (NC SF + other NC types unchanged; only the NC ND residential rows dropped out) |
+| `v_nc_private_regional_septage_facility` | 1,373 | **985** | **−388** (557 SFR rows previously here, minus the 169 over-merge corrections that already happened) |
+| `v_nc_potw_receiving_station` | 124 | **119** | **−5** (the 5 borderline Reclaimed Water rows) |
+| `raw_facility_record` | 99,405 | 99,405 | 0 |
+
+The 562 SFR-filtered rows now land as NULL-type canonicals. Of those:
+- 557 previously carried `private_regional_septage_facility`
+- 5 previously carried `potw_receiving_station` (the Reclaimed Water
+  borderline cases)
+
+`raw_facility_record` count is unchanged at 99,405 — no source data
+is lost, only the canonical-facing type assertion.
+
+### 5-row spot-check on the medium-confidence bucket
+
+The `residential_filter_review` stat counted 5 rows where the SFR
+regex matched but PERMIT_TYPE was not the standard
+`Single-Family Residence Wastewater Irrigation` value. Spot-check:
+
+| Permit | County | FACILITY | PERMIT_TYPE | Owner |
+|---|---|---|---|---|
+| `WQ0044769` | Person | `319 Deerfield Ln. SFR` | Reclaimed Water | Steven L Feierstein |
+| `WQ0040867` | Orange | `6 Lanier Dr. SFR` | Reclaimed Water | Kirstin Joshi |
+| `WQ0037236` | Wake | `7328 Ridgeline Dr. SFR` | Reclaimed Water | Jonathan A Hayes |
+| `WQ0046691` | Wake | `9709 Baileywick Rd. SFR` | Reclaimed Water | John Mark Ward |
+| `WQ0036557` | Wake | `2025 Cadenza Ln. SFR` | Reclaimed Water | Mark A Miller |
+
+**All 5 are clearly residential** — single-family street addresses
+with `SFR` suffix, owned by individuals (not businesses). The
+`Reclaimed Water` PERMIT_TYPE means they're using reclaimed water
+systems (e.g. for household-landscape irrigation) issued under a
+different program than the standard `Wastewater Irrigation`
+residential bucket. The SFR regex is correctly classifying these
+as residential; no regex tightening needed.
+
+Side effect verified: pre-SFR-NULL these 5 rows would have been
+typed `potw_receiving_station` via the NC ND `reclaimed water`
+substring override — the SFR filter is correctly preventing both
+the over-merge AND the wrong type assignment.
+
+### Cross-references
+
+- Phase 4 design pin (with Recorded correction subsection):
+  `docs/build_log.md` 2026-05-12 entry.
+- SFR filter implementation: `resolver/_residential_filter.py`.
+- Main loop wiring: `resolver/entity_resolver.py` (commit `05dce71`
+  initial filter + this commit's NULL-type addition).
+- Category-map source overrides:
+  `resolver/_category_map.NC_ND_PERMIT_TYPE_SUBSTRING_OVERRIDES`.
+
+---
+
 ## 2026-05-12 — Phase 4 stop 1: ANTHROPIC_API_KEY verification PASSED
 
 Austin's Anthropic API key arrived. Smoke test exercised the production
@@ -348,6 +454,89 @@ documented in this file:
 
 Phase 4's resolver re-run reports against the pinned filter set; new
 filters require an entry here first.
+
+### Recorded correction (2026-05-13) — design pin mechanic was inverted
+
+The original "Report contract" subsection above predicted "Pre/post
+canonical count delta — expected drop of 8 to 20 canonicals as the
+over-merged ones split back into the residential-permit-only
+canonicals plus the legitimate non-residential canonicals they were
+over-merged with." **Both the direction and the magnitude were wrong.**
+
+Actual measured result, post-filter resolver `--rebuild --force`
+(scraper_run id=15 succeeding the prior 72,744-canonical baseline):
+
+```
+canonical_facility   72,744 -> 72,913   delta = +169 canonicals (UP)
+```
+
+**Direction inversion** — why the prediction was backwards.
+
+An over-merged pre-filter cluster of N raws was previously **one
+canonical containing all N raws** (the SFR address conflated with
+N-1 unrelated businesses / NPDES rows). Post-filter, the residential
+permit bypasses score-based matching and creates its own canonical;
+the N-1 unrelated raws each return to (or stay in) their own
+correct canonical. So a single over-merge correction:
+
+  before: 1 canonical with N raws
+  after:  N canonicals (1 residential + N-1 unrelated)
+  delta:  +(N-1) canonicals per corrected cluster
+
+That's an **increase** in canonical count per correction, not a
+decrease. The original "drop of 8 to 20" framing collapsed N raws
+into 1, which is the SHAPE of the over-merge, not the SHAPE of the
+correction.
+
+**Magnitude under-estimate** — why 168 corrections, not 8-20.
+
+The original 8-20 estimate came from inspecting the top-3
+over-merged clusters in the Phase 5 item 1 CSV export spot-check
+(each ~7-8 raws → ~21 unrelated raws total). That under-counted by
+about 8× because the SFR over-merge pattern was **much wider than
+the top-3 clusters surfaced**. Measured pattern:
+
+```
+NC ND raws_seen:                 1,259
+residential_filter_excluded:       557   (high-confidence; PERMIT_TYPE confirms residential)
+residential_filter_review:           5   (medium-confidence; PERMIT_TYPE='Reclaimed Water')
+                                ------
+SFR-detected total:                562   (44.6% of all NC ND rows)
+
+Pre-filter:
+  score_auto_merge:                225   (the over-merge bucket)
+Post-filter:
+  score_auto_merge:                 57   (correct cross-source merges)
+                                ------
+  delta:                           168   over-merges UNDONE (= canonical count delta)
+```
+
+So **~30% of NC ND residential rows had an over-merge partner**
+(168 / 562 = 29.9%). Pre-filter that meant ~13% of all NC ND rows
+were silently merging into the wrong canonical. The top-3 clusters
+were the tip; the bulk of over-merges was distributed across many
+smaller (often 2-raw) clusters.
+
+**Corrected understanding for future maintainers.**
+
+- Filter correctness signal is **NOT** "canonical count drops on
+  next resolver rebuild." It's "the previously-top-N-merged SFR
+  clusters now have 1 raw each, and the new top-N is dominated by
+  real business cross-source merges."
+- For a similar filter shipped in a future state, predict canonical
+  count delta as `+(over_merge_count)`, where `over_merge_count`
+  is the pre-filter `score_auto_merge` count for that source minus
+  the expected legitimate merges (NPDES cross-source, etc.). Don't
+  estimate from top-3 visible clusters.
+- 30% over-merge rate on residential-address-named source rows is
+  a useful base rate when sizing similar filters elsewhere (e.g.
+  agricultural irrigation permits keyed on parcel address; tank-
+  registry-by-address sources).
+
+This recorded mistake is more valuable to future maintainers than
+a clean prediction would have been. Keep both the wrong prediction
+and the corrected mechanic in place; do not silently rewrite the
+original.
 
 ---
 
