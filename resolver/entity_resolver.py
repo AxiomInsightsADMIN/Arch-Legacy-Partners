@@ -946,21 +946,31 @@ def _insert_review_queue(
     candidate_id: int,
     hold_reason: str,
     canonical_facility_id: str,
+    closest_existing_canonical_id: str | None = None,
 ) -> None:
     """INSERT one discovery_review_queue row pointing to the canonical
     that this candidate produced (net-new) or was held against
     (borderline). canonical_facility_id is the gate the access-layer
     views use: a row stays out of v_all_in_scope until its review queue
-    row carries resolution='approved_new'."""
+    row carries resolution='approved_new'. closest_existing_canonical_id
+    is the structured pointer used by v_discovery_review (Phase 4.5
+    step E) to surface the merge target on borderline rows; NULL for
+    net_new_discovery rows (no existing match)."""
     cur = conn.cursor()
     try:
         cur.execute(
             """
             INSERT INTO discovery_review_queue
-                (candidate_id, hold_reason, canonical_facility_id)
-            VALUES (%s, %s, %s)
+                (candidate_id, hold_reason, canonical_facility_id,
+                 closest_existing_canonical_id)
+            VALUES (%s, %s, %s, %s)
             """,
-            (candidate_id, hold_reason, canonical_facility_id),
+            (
+                candidate_id,
+                hold_reason,
+                canonical_facility_id,
+                closest_existing_canonical_id,
+            ),
         )
         conn.commit()
     finally:
@@ -1209,6 +1219,9 @@ def run_candidate_import(*, dry_run: bool = False) -> dict:
                     candidate_id=c["candidate_id"],
                     hold_reason=hold_reason,
                     canonical_facility_id=new_cid,
+                    closest_existing_canonical_id=(
+                        closest_existing.canonical_id if closest_existing else None
+                    ),
                 )
                 _mark_candidate_processed(conn, c["candidate_id"])
             borderline_samples.append(
