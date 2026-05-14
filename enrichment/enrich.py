@@ -104,8 +104,66 @@ def _haiku_to_record(
     )
 
 
+def _promote_to_canonical(
+    conn,
+    *,
+    facility_id: str,
+    haiku: _haiku.HaikuResult,
+) -> None:
+    """UPDATE canonical_facility.accepts_* from a HaikuResult.
+
+    Called on BOTH paths in enrich_facility:
+      - fresh Haiku call: right after _cache.store() succeeds
+      - cache hit: right after reconstructing the HaikuResult from
+        the cached response_json
+
+    Why both paths: the canonical row should converge to the cached
+    verdict regardless of how it got into the cache. This makes
+    re-running idempotent — the cache stays untouched if already
+    populated (the cache-hit path skips Haiku), and the canonical
+    row picks up the same verdict either way.
+
+    No-op when haiku.error is set or facility_id is empty — we don't
+    have a trustworthy verdict to write.
+
+    Per-row commit (matches the per-row cache-write pattern from the
+    Phase 4 resilience events). Worst-case loss on a kill is one
+    in-flight canonical update.
+    """
+    if haiku.error is not None or not facility_id:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE canonical_facility
+               SET accepts_septage         = %s,
+                   accepts_grease_trap     = %s,
+                   accepts_portable_toilet = %s,
+                   last_seen_at            = NOW()
+             WHERE id = %s
+            """,
+            (
+                haiku.accepts_septage.value,
+                haiku.accepts_grease_trap.value,
+                haiku.accepts_portable_toilet.value,
+                facility_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def enrich_facility(facility: dict, *, conn) -> EnrichedFacility:
-    """Brave Search + Haiku extract for one facility with cache lookup."""
+    """Brave Search + Haiku extract for one facility with cache lookup.
+
+    Side effect: on a successful verdict (either fresh from Haiku or
+    reconstructed from cache), UPDATEs canonical_facility.accepts_*
+    via `_promote_to_canonical`. This closes the gap where Phase 4 stop
+    4 had populated llm_enrichment_cache but never landed verdicts on
+    the canonical rows, leaving v_all_in_scope showing NULLs.
+    """
     fid = facility.get("id", "")
     brave_query = _brave.build_query(facility)
 
@@ -146,6 +204,10 @@ def enrich_facility(facility: dict, *, conn) -> EnrichedFacility:
             output_tokens=cached["output_tokens"] or 0,
             stop_reason="cache",
         )
+        # Promote the cached verdict to the canonical row even on cache
+        # hits — this is what makes re-runs converge canonical_facility
+        # to the cached state regardless of which run populated the cache.
+        _promote_to_canonical(conn, facility_id=fid, haiku=haiku)
         cost = (
             haiku.input_tokens * INPUT_USD_PER_MTOK / 1_000_000
             + haiku.output_tokens * OUTPUT_USD_PER_MTOK / 1_000_000
@@ -169,6 +231,10 @@ def enrich_facility(facility: dict, *, conn) -> EnrichedFacility:
             conn.commit()
         finally:
             write_cur.close()
+        # Promote the fresh verdict to the canonical row. Done AFTER the
+        # cache write so a kill between cache-store and promote leaves the
+        # cache populated; the next run cache-hits and promotes.
+        _promote_to_canonical(conn, facility_id=fid, haiku=haiku)
 
     cost = (
         haiku.input_tokens * INPUT_USD_PER_MTOK / 1_000_000

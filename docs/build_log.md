@@ -6,6 +6,73 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-14 — Phase 4 follow-on: pipeline-level promote of enrichment verdicts to canonical_facility.accepts_*
+
+### The gap
+
+The delivery prep A scorecard work surfaced that Phase 4 enrichment had
+been writing verdicts to `llm_enrichment_cache` but never landing them
+on `canonical_facility.accepts_*`. Consequence: `v_all_in_scope` and the
+monthly-refresh CSV would have shown all-NULL acceptance flags despite
+Phase 4 producing 1,742 affirmative answers across the 1,970-row pass.
+
+### The one-off backfill (delivery prep A, already applied)
+
+`local/_promote_enrichment_to_canonical.py` (gitignored) read
+`local/_stop4_enrichment_results.json` and UPDATEd the 1,970 in-scope
+canonical rows. Post-backfill distribution matched the Phase 4 close
+report exactly: 509 / 9 / 1,452 septage, 233 / 25 / 1,712 grease,
+236 / 9 / 1,725 portable. This made the scorecard meaningful.
+
+### The pipeline-level fix (this commit)
+
+`enrichment/enrich.py` now defines `_promote_to_canonical(conn, *,
+facility_id, haiku)` and calls it on BOTH paths in `enrich_facility`:
+
+- **Cache-miss path** — right after a fresh Haiku call succeeds and its
+  result is written to `llm_enrichment_cache`. The canonical row picks
+  up the fresh verdict.
+- **Cache-hit path** — right after the cached `response_json` is
+  reconstructed into a `HaikuResult`. The canonical row converges to
+  the cached verdict regardless of how the cache got populated.
+
+Both paths use per-row commits, matching the Phase 4 cache-write
+resilience pattern: a mid-run kill loses at most one in-flight
+canonical update; the cache itself is intact, so a re-run cache-hits
+and promotes.
+
+### Validation
+
+`local/_validate_auto_promote.py` (gitignored) picked 8 random in-scope
+canonicals with populated acceptance flags, recorded their values,
+NULLed them, and re-ran `enrich_facility` on each. Result:
+
+- All 8 canonicals had their `accepts_*` columns restored to the
+  recorded before-state.
+- 3 hit the cache (cache-hit promote path).
+- 5 had cache misses (Brave isn't perfectly deterministic across
+  re-queries → different content_hash → fresh Haiku call) — those went
+  through the cache-miss promote path. The v1.1.1 prompt produced the
+  same verdicts on the fresh calls as the original cache, so the values
+  matched the recorded before-state in all 5 as well.
+
+Both code paths exercised, both verified working.
+
+### Runbook touch
+
+`docs/runbook_monthly_refresh.md` §3.3 (Resolver issues) gains a brief
+note: when Phase 4 enrichment is added to the monthly cron in Phase 5
+/ 6, no manual after-step is required; the auto-promote handles it.
+
+### Cost / side-effect of running the validation
+
+8 facilities × ~$0.003 = ~$0.025 incremental Anthropic spend (the 5
+fresh Haiku calls). Cumulative Anthropic spend post-validation: ~$13.62
+of $40 cap. Brave: ~2,978 queries cumulative against the $25 paid tier
+top-up.
+
+---
+
 ## 2026-05-14 — Delivery prep A: data quality scorecard generated from live Supabase data
 
 `docs/data_quality_scorecard_v1.md` — per-state × per-category breakdown

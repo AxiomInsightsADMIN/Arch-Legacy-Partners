@@ -214,6 +214,15 @@ The resolver step runs `python -m resolver.entity_resolver --rebuild --force`.
 | Hold-queue overflow | `hold_review_queue.sql` returns >100K rows. | Not a workflow failure but worth flagging. Phase 4 enrichment is the operational answer; no immediate action needed. |
 | Resolver completes but canonical count drops sharply (>10%) | Either real source-side shrinkage (already caught by drift detector) OR a category-map bug demoting rows. | Compare `v_all_in_scope` count to the prior month's. If unexplained, escalate. |
 
+**Phase 4 enrichment self-promote (post-2026-05-14).** When Phase 4
+enrichment is added to the monthly cron in Phase 5 / 6, no manual
+"after enrichment" step is required: `enrichment/enrich.py` UPDATEs
+`canonical_facility.accepts_*` columns per-row on both fresh Haiku
+calls and cache hits, so the canonical rows converge to the cached
+verdict by the time the CSV export step runs. The auto-promote was
+added in commit landing in `docs/build_log.md` 2026-05-14 "Phase 4
+follow-on: pipeline-level promote of enrichment verdicts" entry.
+
 ### 3.4. CSV export issues (step 15)
 
 | Symptom | Likely cause | Fix |
