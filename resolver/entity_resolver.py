@@ -630,16 +630,25 @@ def _score_candidate_against_bucket(
     typed_index: dict,
 ) -> tuple[CandidateCanonical | None, float, bool]:
     """RapidFuzz match a candidate against the (state, facility_type)
-    bucket. Returns (best_canonical, best_score, tiebreak_applied)."""
+    bucket. Returns (best_canonical, best_score, tiebreak_applied).
+
+    Name-only scoring (vs the main resolver's name|city|state composite):
+    the (state, facility_type) bucket pre-filter already guarantees both
+    sides of every comparison share state, so a composite key would have
+    a shared "| TX" / "| NC" suffix that inflates RapidFuzz partial_ratio
+    and lands every comparison at WRatio ~85.5 regardless of name
+    similarity. Scoring on name alone restores discrimination. (Discovered
+    during the first step D run on 2026-05-14 — see the build_log entry.)
+    """
     bucket = typed_index.get((state, facility_type), [])
     if not bucket or not name:
         return None, 0.0, False
-    raw_key = f"{name} |  | {state}".strip()
     best: CandidateCanonical | None = None
     best_score = -1.0
     for cand in bucket:
-        cand_key = f"{cand.name or ''} | {cand.city or ''} | {cand.state or ''}".strip()
-        s = fuzz.WRatio(raw_key, cand_key)
+        if not cand.name:
+            continue
+        s = fuzz.WRatio(name, cand.name)
         if s > best_score:
             best_score = s
             best = cand
@@ -829,7 +838,10 @@ def _insert_new_canonical(
     state: str,
     facility_type: str | None,
 ) -> str:
-    """INSERT a new canonical_facility from a discovery candidate."""
+    """INSERT a new canonical_facility from a discovery candidate. Sets
+    `source='discovery_crawl'` so the access-layer view gate (per the
+    20260514220000 migration) keeps it out of v_all_in_scope until a
+    human approves the candidate through discovery_review_queue."""
     canonical_id = str(uuid.uuid4())
     name = (payload.get("name") or "").strip() or None
     city = (payload.get("city") or "").strip() or None
@@ -842,8 +854,8 @@ def _insert_new_canonical(
             """
             INSERT INTO canonical_facility
                 (id, name, facility_type, street, city, state, phone, website,
-                 first_seen_at, last_seen_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                 source, first_seen_at, last_seen_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'discovery_crawl', NOW(), NOW())
             """,
             (canonical_id, name, facility_type, street, city, state, phone, website),
         )
@@ -933,17 +945,22 @@ def _insert_review_queue(
     *,
     candidate_id: int,
     hold_reason: str,
+    canonical_facility_id: str,
 ) -> None:
-    """INSERT one discovery_review_queue row for the held candidate."""
+    """INSERT one discovery_review_queue row pointing to the canonical
+    that this candidate produced (net-new) or was held against
+    (borderline). canonical_facility_id is the gate the access-layer
+    views use: a row stays out of v_all_in_scope until its review queue
+    row carries resolution='approved_new'."""
     cur = conn.cursor()
     try:
         cur.execute(
             """
             INSERT INTO discovery_review_queue
-                (candidate_id, hold_reason)
-            VALUES (%s, %s)
+                (candidate_id, hold_reason, canonical_facility_id)
+            VALUES (%s, %s, %s)
             """,
-            (candidate_id, hold_reason),
+            (candidate_id, hold_reason, canonical_facility_id),
         )
         conn.commit()
     finally:
@@ -1187,7 +1204,12 @@ def run_candidate_import(*, dry_run: bool = False) -> dict:
                     f"closest_canonical_id={closest_existing.canonical_id if closest_existing else 'none'} "
                     f"closest_name={closest_existing.name if closest_existing else 'none'!r}"
                 )
-                _insert_review_queue(conn, candidate_id=c["candidate_id"], hold_reason=hold_reason)
+                _insert_review_queue(
+                    conn,
+                    candidate_id=c["candidate_id"],
+                    hold_reason=hold_reason,
+                    canonical_facility_id=new_cid,
+                )
                 _mark_candidate_processed(conn, c["candidate_id"])
             borderline_samples.append(
                 {
@@ -1248,6 +1270,7 @@ def run_candidate_import(*, dry_run: bool = False) -> dict:
                     conn,
                     candidate_id=c["candidate_id"],
                     hold_reason="net_new_discovery",
+                    canonical_facility_id=new_cid,
                 )
                 _mark_candidate_processed(conn, c["candidate_id"])
             if len(net_new_samples[cat]) < 10:
