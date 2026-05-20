@@ -6,6 +6,37 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-05-15 — Pre-handoff: RLS default-deny on public schema tables
+
+Supabase's Advisors page was flagging `rls_disabled_in_public` on all
+14 public-schema tables. Risk in this project is low (anon key is
+gitignored / only in GH Actions secrets, repo is private, no client
+app uses the Data API, all build-phase tooling connects via
+service_role which bypasses RLS), but the warning would land in
+Austin's inbox on day one of the handoff regardless.
+
+`supabase/migrations/20260515090000_enable_rls_on_public_tables.sql`
+runs `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` on each of the 14
+tables with no policies. Net effect:
+
+- `anon` and `authenticated` roles: default-deny on every table.
+- `service_role` (used by scrapers, resolver, enrichment, exporter,
+  geocoder, and the monthly cron): bypasses RLS by design — zero
+  operational change.
+
+Applied via a one-off psycopg2 session against the linked Supabase
+project (service_role pooler connection from `.env`). Verified via
+`pg_tables.rowsecurity = true` on all 14 tables and confirmed
+`SELECT COUNT(*) FROM canonical_facility` still returns 73,054 rows
+and `SELECT COUNT(*) FROM v_all_in_scope` returns 1,970 via
+service_role — operations unaffected.
+
+Posture documented as §9 in `docs/v1_scope_limitations.md` so Austin's
+team has a single page covering the constraint and the migration to
+extend it for future Data API clients.
+
+---
+
 ## 2026-05-14 — Phase 4 follow-on: pipeline-level promote of enrichment verdicts to canonical_facility.accepts_*
 
 ### The gap

@@ -359,3 +359,16 @@ in `docs/tceq_pdl_audit.md`. The NC DEQ audit detail lives in
 during Phase 2–5 will be appended as a new top-level section here,
 not written separately, so the client gets a single page of
 constraints at handoff.
+
+## 9. Row Level Security posture
+
+All public-schema tables have Row Level Security enabled with no
+policies, producing a default-deny posture for the `anon` and
+`authenticated` roles. The `service_role` key (used by all build-phase
+tooling and the monthly refresh workflow) bypasses RLS by design, so
+operational behavior is unchanged. To expose any table to a future
+Data API client, add explicit policies via a new migration; reference
+Supabase's RLS documentation
+(`https://supabase.com/docs/guides/database/postgres/row-level-security`).
+The migration that established this posture is
+`supabase/migrations/20260515090000_enable_rls_on_public_tables.sql`.
