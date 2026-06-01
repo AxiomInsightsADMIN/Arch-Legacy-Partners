@@ -33,6 +33,22 @@ def db_connect() -> psycopg2.extensions.connection:
     Reads SUPABASE_DB_* env vars from .env. The .env's pooler values are
     canonical (see memory: project_supabase_pooler — Tokyo aws-1 fleet).
     """
+    # GitHub Actions renders an unpopulated secret as an empty string, so a
+    # missing secret would otherwise surface as a confusing ValueError on
+    # int(port) below. Validate up front and name the offending variable.
+    required = (
+        "SUPABASE_DB_HOST",
+        "SUPABASE_DB_PORT",
+        "SUPABASE_DB_NAME",
+        "SUPABASE_DB_USER",
+        "SUPABASE_DB_PASSWORD",
+    )
+    for var in required:
+        if not os.environ.get(var):
+            raise RuntimeError(
+                f"{var} is unset or empty in the environment. "
+                "Confirm GitHub Actions secrets are populated for scheduled runs."
+            )
     return psycopg2.connect(
         host=os.environ["SUPABASE_DB_HOST"],
         port=int(os.environ["SUPABASE_DB_PORT"]),
