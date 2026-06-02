@@ -1,0 +1,121 @@
+{
+  "generated_at": "2026-06-02T07:58:58.506142+00:00",
+  "overall_status": "pass",
+  "pause_count": 0,
+  "source_count": 7,
+  "sources": {
+    "discovery_crawl": {
+      "status": "pass",
+      "reason": null,
+      "details": {
+        "comparison": "no_signatures_yet"
+      }
+    },
+    "epa_cwns_2022": {
+      "status": "pass",
+      "reason": null,
+      "details": {
+        "latest_signature_id": 20,
+        "latest_row_count": 3132,
+        "latest_byte_size": 617079,
+        "latest_http_status": 200,
+        "latest_schema_hash_prefix": "cb282fec57ee",
+        "prior_signature_id": 14,
+        "prior_row_count": 3132,
+        "prior_byte_size": 617079,
+        "prior_schema_hash_prefix": "cb282fec57ee",
+        "row_count_drop_fraction": 0.0,
+        "byte_size_delta_fraction": 0.0
+      }
+    },
+    "epa_echo": {
+      "status": "pass",
+      "reason": null,
+      "details": {
+        "latest_signature_id": 19,
+        "latest_row_count": 91981,
+        "latest_byte_size": 24589228,
+        "latest_http_status": 200,
+        "latest_schema_hash_prefix": "699dec10fc9a",
+        "prior_signature_id": 13,
+        "prior_row_count": 91981,
+        "prior_byte_size": 24589228,
+        "prior_schema_hash_prefix": "699dec10fc9a",
+        "row_count_drop_fraction": 0.0,
+        "byte_size_delta_fraction": 0.0
+      }
+    },
+    "nc_deq_non_discharge_facilities": {
+      "status": "pass",
+      "reason": null,
+      "details": {
+        "latest_signature_id": 22,
+        "latest_row_count": 1259,
+        "latest_byte_size": 821859,
+        "latest_http_status": 200,
+        "latest_schema_hash_prefix": "55cf03a85c4f",
+        "prior_signature_id": 16,
+        "prior_row_count": 1259,
+        "prior_byte_size": 821859,
+        "prior_schema_hash_prefix": "55cf03a85c4f",
+        "row_count_drop_fraction": 0.0,
+        "byte_size_delta_fraction": 0.0
+      }
+    },
+    "nc_deq_septage_firm_list": {
+      "status": "pass",
+      "reason": null,
+      "details": {
+        "latest_signature_id": 24,
+        "latest_row_count": 759,
+        "latest_byte_size": 76351,
+        "latest_http_status": null,
+        "latest_schema_hash_prefix": "3c14eb5ded70",
+        "prior_signature_id": 18,
+        "prior_row_count": 759,
+        "prior_byte_size": 76351,
+        "prior_schema_hash_prefix": "3c14eb5ded70",
+        "row_count_drop_fraction": 0.0,
+        "byte_size_delta_fraction": 0.0
+      }
+    },
+    "nc_deq_solid_waste_facility_list": {
+      "status": "pass",
+      "reason": null,
+      "details": {
+        "latest_signature_id": 23,
+        "latest_row_count": 435,
+        "latest_byte_size": 66417,
+        "latest_http_status": null,
+        "latest_schema_hash_prefix": "26a6dab77852",
+        "prior_signature_id": 17,
+        "prior_row_count": 435,
+        "prior_byte_size": 66417,
+        "prior_schema_hash_prefix": "26a6dab77852",
+        "row_count_drop_fraction": 0.0,
+        "byte_size_delta_fraction": 0.0
+      }
+    },
+    "tceq_msw_facilities_xls": {
+      "status": "pass",
+      "reason": null,
+      "details": {
+        "latest_signature_id": 21,
+        "latest_row_count": 1497,
+        "latest_byte_size": 843776,
+        "latest_http_status": 200,
+        "latest_schema_hash_prefix": "b16e6bb0c7c5",
+        "prior_signature_id": 15,
+        "prior_row_count": 1497,
+        "prior_byte_size": 843776,
+        "prior_schema_hash_prefix": "b16e6bb0c7c5",
+        "row_count_drop_fraction": 0.0,
+        "byte_size_delta_fraction": 0.0
+      }
+    }
+  },
+  "thresholds": {
+    "row_count_drop": 0.3,
+    "byte_size_delta": 0.5
+  }
+}
