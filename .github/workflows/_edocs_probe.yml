@@ -1,0 +1,107 @@
+name: _edocs_probe (throwaway connectivity test)
+
+# THROWAWAY connectivity probe. Tests whether a US-based GitHub Actions
+# runner can reach the edocs.deq.nc.gov NC manual-drop URLs that are blocked
+# from non-US (Korea) locations. workflow_dispatch ONLY — no schedule. No
+# secrets, no Supabase, no data load, no commits from the job itself. This
+# file is DELETED after the result is captured (Task 1 of pre-July-1 readiness).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: edocs connectivity probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Probe edocs URLs
+        run: |
+          python - <<'PY'
+          import requests
+
+          URLS = [
+              "https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132701&dbid=0&repo=WasteManagement",
+              "https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132702&dbid=0&repo=WasteManagement",
+          ]
+          # Browser-like headers so the probe approximates what Playwright (a real
+          # browser) would send — this tests the network/server's willingness to
+          # serve a US runner, not whether the default requests UA is filtered.
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+              "Accept": "*/*",
+              "Accept-Language": "en-US,en;q=0.9",
+          }
+          TIMEOUT = 30
+
+
+          def probe(url):
+              print("=" * 72)
+              print("URL:", url)
+              head_ok = False
+              try:
+                  r = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=TIMEOUT)
+                  print(f"[HEAD] status={r.status_code} final_url={r.url}")
+                  print(f"[HEAD] content-type={r.headers.get('Content-Type')!r} content-length={r.headers.get('Content-Length')!r}")
+                  hist = [(h.status_code, h.headers.get('Location')) for h in r.history]
+                  print(f"[HEAD] redirects={hist or 'none'}")
+                  head_ok = r.status_code == 200
+              except requests.exceptions.RequestException as e:
+                  print(f"[HEAD] TRANSPORT-FAILURE {type(e).__name__}: {e}")
+
+              get_ok = False
+              n = 0
+              try:
+                  h = dict(HEADERS, Range="bytes=0-1023")
+                  r = requests.get(url, headers=h, allow_redirects=True, timeout=TIMEOUT, stream=True)
+                  chunk = next(r.iter_content(chunk_size=4096), b"")
+                  n = len(chunk)
+                  print(f"[GET ] status={r.status_code} (206=range honored / 200=full body) final_url={r.url}")
+                  print(f"[GET ] content-type={r.headers.get('Content-Type')!r} content-length={r.headers.get('Content-Length')!r} content-range={r.headers.get('Content-Range')!r}")
+                  print(f"[GET ] bytes_pulled={n} first8={chunk[:8]!r}")
+                  print("       (note: a real .xlsx begins with the ZIP magic bytes PK 03 04)")
+                  r.close()
+                  get_ok = r.status_code in (200, 206) and n > 0
+              except requests.exceptions.RequestException as e:
+                  print(f"[GET ] TRANSPORT-FAILURE {type(e).__name__}: {e}")
+              return head_ok, get_ok, n
+
+
+          def main():
+              try:
+                  ip = requests.get("https://api.ipify.org", timeout=15).text.strip()
+                  print("Runner public egress IP:", ip)
+              except Exception as e:
+                  print("Could not determine egress IP:", e)
+              rows = []
+              for u in URLS:
+                  docid = u.split("docid=")[1].split("&")[0]
+                  ho, go, n = probe(u)
+                  rows.append((docid, ho, go, n))
+              print("=" * 72)
+              print("SUMMARY")
+              all_ok = True
+              for docid, ho, go, n in rows:
+                  verdict = "REACHABLE (pulled bytes)" if go else "NOT REACHABLE"
+                  print(f"  docid={docid}: HEAD_200={ho} GET_ok={go} bytes={n} -> {verdict}")
+                  all_ok = all_ok and go
+              print("OVERALL:", "ALL REACHABLE - NC automation likely viable from US runner" if all_ok else "AT LEAST ONE BLOCKED - manual-drop posture stays")
+
+
+          main()
+          PY
