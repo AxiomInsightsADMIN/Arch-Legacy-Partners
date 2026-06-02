@@ -1,0 +1,298 @@
+name: _edocs_discovery_probe (throwaway docid-discovery test)
+
+# THROWAWAY docid-discovery probe. Task 3 PROVED a real browser session on a
+# US GitHub runner can pull the two NC XLSX files by HARDCODED docid
+# (2132701 / 2132702). But the file names carry a publication date
+# (_20260428), so those docids almost certainly rotate each period and
+# hardcoding will break. This probe learns HOW to discover the current docid
+# per report category: land for a session, walk the WasteManagement WebLink
+# folders from the "Solid Waste" link, find the entries whose names start with
+# PermittedFacilityList / PermittedSeptageFirm, and extract their current
+# docids. It then confirms each discovered docid actually downloads a valid
+# XLSX (PK magic) and whether it still matches the known 2132701 / 2132702.
+# workflow_dispatch only. No secrets, no Supabase, no data load. DELETE after
+# capturing the verdict.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: edocs docid discovery probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright + chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Probe edocs WebLink for the current docids
+        run: |
+          python - <<'PY'
+          import re
+          from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+          BASE = "https://edocs.deq.nc.gov/WasteManagement/"
+          # Known docids from the Task 3 probe (the 2026-04-28 publication).
+          KNOWN = {"permittedfacilitylist": "2132701", "permittedseptagefirm": "2132702"}
+          TARGETS = ("permittedfacilitylist", "permittedseptagefirm")
+          KEYWORDS = ("solid waste", "permitted", "facilit", "septage", "list",
+                      "active", "waste", "roster", "registr")
+          MAX_VISITS = 16
+          MAX_DEPTH = 4
+
+          DOCID_RE = re.compile(r"[?&]docid=(\d+)", re.I)
+          ID_RE = re.compile(r"[?&]id=(\d+)", re.I)
+
+          def norm(s):
+              return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+          def collect_anchors(page):
+              try:
+                  return page.eval_on_selector_all(
+                      "a",
+                      "els => els.map(e => ["
+                      " (e.textContent||'').replace(/\\s+/g,' ').trim().slice(0,140),"
+                      " e.href||'',"
+                      " (e.getAttribute('onclick')||'').slice(0,160) ])",
+                  )
+              except Exception as e:
+                  print(f"    anchor-collect error: {type(e).__name__}: {e}")
+                  return []
+
+          def classify(anchors):
+              folders, docs = [], []
+              for text, href, onclick in anchors:
+                  low = (href or "").lower()
+                  if "browse.aspx" in low and ID_RE.search(href):
+                      folders.append((text, href, ID_RE.search(href).group(1)))
+                  elif "docview.aspx" in low and ID_RE.search(href):
+                      docs.append((text, href, ID_RE.search(href).group(1)))
+                  elif "electronicfile.aspx" in low and DOCID_RE.search(href):
+                      docs.append((text, href, DOCID_RE.search(href).group(1)))
+              return folders, docs
+
+          def record_docs(docs, found, folder_id, folder_name):
+              for text, href, docid in docs:
+                  n = norm(text)
+                  for pref in TARGETS:
+                      if n.startswith(pref) and pref not in found:
+                          found[pref] = {"name": text, "docid": docid, "href": href,
+                                         "folder_id": folder_id, "folder_name": folder_name}
+                          print(f"    *** MATCH {pref}: name={text!r} docid={docid} "
+                                f"(folder id={folder_id} {folder_name!r})")
+
+          def regex_net(html, found, folder_id, folder_name):
+              # Safety net if the listing does not expose docids via plain anchors.
+              for m in re.finditer(r"(PermittedFacilityList|PermittedSeptageFirm)[\w .\-]*", html, re.I):
+                  seg = m.group(0)[:80]
+                  win = html[max(0, m.start() - 500): m.end() + 500]
+                  ids = DOCID_RE.findall(win) or ID_RE.findall(win)
+                  print(f"    [regex-net] {seg!r} nearby_ids={ids[:6]}")
+                  pref = norm(m.group(1))
+                  if pref in TARGETS and pref not in found and ids:
+                      found[pref] = {"name": seg, "docid": ids[0], "href": "(regex-net)",
+                                     "folder_id": folder_id, "folder_name": folder_name}
+
+          def both(found):
+              return all(p in found for p in TARGETS)
+
+          def try_ajax(context, folder_id):
+              pg = context.new_page()
+              try:
+                  pg.goto(BASE, wait_until="domcontentloaded", timeout=30000)
+                  js = (
+                      "async (fid) => {"
+                      " const body = JSON.stringify({repoName:'WasteManagement',"
+                      " folderId: Number(fid), getNewListing:true, start:0, end:100,"
+                      " sortColumn:'', sortAscending:true});"
+                      " const r = await fetch('Browse.aspx/GetFolderListing2',"
+                      " {method:'POST', headers:{'Content-Type':'application/json; charset=utf-8',"
+                      " 'X-Requested-With':'XMLHttpRequest'}, body});"
+                      " const t = await r.text();"
+                      " return {status:r.status, len:t.length, head:t.slice(0,700)}; }"
+                  )
+                  res = pg.evaluate(js, str(folder_id))
+                  print(f"  [AJAX] GetFolderListing2(folderId={folder_id}) "
+                        f"status={res.get('status')} len={res.get('len')}")
+                  print(f"  [AJAX] head={res.get('head')!r}")
+              except Exception as e:
+                  print(f"  [AJAX] error (non-fatal): {type(e).__name__}: {e}")
+              finally:
+                  pg.close()
+
+          def verify_download(context, docid):
+              page = context.new_page()
+              dl = None
+              try:
+                  url = (f"{BASE}ElectronicFile.aspx?docid={docid}"
+                         f"&dbid=0&repo=WasteManagement")
+                  with page.expect_download(timeout=15000) as d:
+                      try:
+                          page.goto(url, wait_until="commit", timeout=30000)
+                      except Exception:
+                          pass
+                  dl = d.value
+              except PWTimeout:
+                  dl = None
+              if dl is None:
+                  page.close()
+                  return {"ok": False, "size": 0, "name": None}
+              try:
+                  path = dl.path()
+                  with open(path, "rb") as fh:
+                      head = fh.read(8)
+                  import os
+                  size = os.path.getsize(path) if path else 0
+                  ok = head[:4] == b"PK\x03\x04" and size > 0
+                  res = {"ok": ok, "size": size, "name": dl.suggested_filename, "head": head}
+              except Exception as e:
+                  res = {"ok": False, "size": 0, "name": None, "err": repr(e)}
+              page.close()
+              return res
+
+          def main():
+              found = {}
+              parent = {}  # folder_id -> (name, parent_id)
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True)
+                  context = browser.new_context(accept_downloads=True)
+
+                  print("=" * 72)
+                  print(f"[LAND] {BASE}")
+                  lp = context.new_page()
+                  try:
+                      resp = lp.goto(BASE, wait_until="networkidle", timeout=45000)
+                      print(f"  status={resp.status if resp else None} final_url={lp.url}")
+                      print(f"  title={lp.title()!r}")
+                      print(f"  cookies_after_landing={len(context.cookies())}")
+                  except Exception as e:
+                      print(f"  LAND error: {type(e).__name__}: {e}")
+                  wa = collect_anchors(lp)
+                  print(f"  welcome anchors: {len(wa)}")
+                  for t, h, o in wa:
+                      tag = "DIR" if "browse.aspx" in h.lower() else (
+                          "DOC" if ("docview.aspx" in h.lower() or "electronicfile" in h.lower()) else "   ")
+                      print(f"    {tag} | {t!r:48} | {h}")
+                  folders, docs = classify(wa)
+                  record_docs(docs, found, None, "welcome")
+                  lp.close()
+
+                  seeds = [f for f in folders if "solid waste" in f[0].lower()]
+                  if not seeds:
+                      seeds = [f for f in folders if any(k in f[0].lower() for k in KEYWORDS)]
+                  if not seeds:
+                      seeds = folders[:]
+                  seen_ids = set()
+                  queue = []
+                  for t, h, i in seeds:
+                      if i not in seen_ids:
+                          seen_ids.add(i)
+                          queue.append((h, i, t, 1))
+                          parent[i] = (t, None)
+                  print(f"  seed folders queued: {[(t, i) for (h, i, t, d) in queue]}")
+
+                  visited = set()
+                  visits = 0
+                  while queue and visits < MAX_VISITS and not both(found):
+                      href, fid, name, depth = queue.pop(0)
+                      if fid in visited:
+                          continue
+                      visited.add(fid)
+                      visits += 1
+                      print("-" * 72)
+                      print(f"[FOLDER d{depth} #{visits}] {name!r} id={fid}")
+                      fp = context.new_page()
+                      html = ""
+                      try:
+                          fp.goto(href, wait_until="networkidle", timeout=45000)
+                          print(f"  final_url={fp.url} title={fp.title()!r}")
+                          html = fp.content()
+                      except Exception as e:
+                          print(f"  folder goto error: {type(e).__name__}: {e}")
+                      a = collect_anchors(fp)
+                      fp.close()
+                      subf, subd = classify(a)
+                      print(f"  anchors={len(a)} subfolders={len(subf)} docs={len(subd)}")
+                      for t, h, i in subd[:60]:
+                          print(f"    DOC | docid={i:>9} | {t!r}")
+                      for t, h, i in subf[:60]:
+                          print(f"    DIR | id={i:>9} | {t!r}")
+                      record_docs(subd, found, fid, name)
+                      if not both(found):
+                          regex_net(html, found, fid, name)
+                      if depth < MAX_DEPTH:
+                          pri = [s for s in subf if any(k in s[0].lower() for k in KEYWORDS)]
+                          rest = [s for s in subf if s not in pri]
+                          for t, h, i in pri + rest:
+                              if i not in seen_ids:
+                                  seen_ids.add(i)
+                                  parent[i] = (t, fid)
+                                  queue.append((h, i, t, depth + 1))
+
+                  # Bonus: does the WebLink AJAX listing endpoint work in-session?
+                  container_id = None
+                  for pref in TARGETS:
+                      if pref in found and found[pref].get("folder_id"):
+                          container_id = found[pref]["folder_id"]
+                  if container_id:
+                      print("-" * 72)
+                      print(f"[AJAX TEST] on container folder id={container_id}")
+                      try_ajax(context, container_id)
+
+                  # Verify each discovered docid downloads a valid XLSX.
+                  print("=" * 72)
+                  print("VERIFY DOWNLOADS (discovered docids)")
+                  for pref in TARGETS:
+                      if pref in found:
+                          did = found[pref]["docid"]
+                          v = verify_download(context, did)
+                          found[pref]["fetch_ok"] = v["ok"]
+                          found[pref]["fetch_size"] = v["size"]
+                          found[pref]["fetch_name"] = v["name"]
+                          print(f"  {pref}: docid={did} fetch_ok={v['ok']} "
+                                f"size={v['size']} name={v.get('name')!r}")
+
+                  context.close()
+                  browser.close()
+
+              def chain(fid):
+                  out = []
+                  seen = set()
+                  while fid is not None and fid not in seen:
+                      seen.add(fid)
+                      nm, par = parent.get(fid, (None, None))
+                      out.append(f"{nm!r}(id={fid})")
+                      fid = par
+                  return " <- ".join(out)
+
+              print("=" * 72)
+              print("==== DISCOVERY SUMMARY ====")
+              all_ok = True
+              for pref in TARGETS:
+                  if pref in found:
+                      f = found[pref]
+                      km = (f["docid"] == KNOWN[pref])
+                      print(f"  {pref}: name={f['name']!r} docid={f['docid']} "
+                            f"matches_known_{KNOWN[pref]}={km} "
+                            f"fetch_ok={f.get('fetch_ok')} size={f.get('fetch_size')}")
+                      print(f"      container: {chain(f.get('folder_id'))}")
+                      print(f"      href: {f['href']}")
+                      all_ok = all_ok and bool(f.get("fetch_ok"))
+                  else:
+                      print(f"  {pref}: NOT DISCOVERED")
+                      all_ok = False
+              print("VERDICT:", "DISCOVERY VIABLE — both docids found & fetchable"
+                    if all_ok else "NEEDS REVIEW — see folder dump above")
+
+          main()
+          PY
