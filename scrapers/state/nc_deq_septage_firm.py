@@ -9,11 +9,17 @@ private septage hauler / firm.
 
 Access path
 -----------
-Same edocs document repository as the solid-waste list (docid=2132702
-here vs 2132701 there). Same network-layer TCP block on the Playwright
-path; same manual-drop fallback at
-`local/manual_drops/nc_deq_septage_firm/`. See the Phase 2 step 3
-build_log entry for the failure mode write-up.
+Same edocs Laserfiche WebLink repository as the solid-waste list. The
+docid rotates each publication period, so it is discovered at run time
+via the shared `scrapers.state._nc_edocs` helper: the primary path
+scrapes the public DEQ "Solid Waste Facility Lists" web page for the
+current edocs `docid=` link, the fallback browses the edocs folder that
+holds the roster, and the XLSX is fetched in a browser session. edocs
+is reachable from a US egress (e.g. the GitHub Actions runner); the
+historic "network block" was geographic, not a network-layer WAF. On
+any autonomous-fetch failure, the loader falls back to the manual-drop
+pickup at `local/manual_drops/nc_deq_septage_firm/`. See
+`docs/nc_deq_audit.md` and the 2026-06-02 build_log entry.
 
 Source schema (verified from 2026-05-11 manual drop)
 ----------------------------------------------------
@@ -65,6 +71,7 @@ from scrapers._loader_utils import (  # noqa: E402
     get_source_id,
     hash_payload,
 )
+from scrapers.state._nc_edocs import fetch_report_xlsx  # noqa: E402
 
 ROOT = _PROJECT_ROOT
 
@@ -80,11 +87,8 @@ BATCH_SIZE = 500
 
 MANUAL_DROP_DIR = ROOT / "local" / "manual_drops" / "nc_deq_septage_firm"
 
-PW_URL = (
-    "https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx"
-    "?docid=2132702&dbid=0&repo=WasteManagement"
-)
-PW_NAV_TIMEOUT_MS = 30_000
+# The edocs docid is discovered at run time (never hardcoded) and the XLSX is
+# fetched in a browser session -- both live in scrapers.state._nc_edocs.
 
 # Sheet-name pattern for content-date extraction
 _SHEET_DATE_RE = re.compile(r"(\d{8})$")  # trailing YYYYMMDD
@@ -92,7 +96,7 @@ _SHEET_DATE_RE = re.compile(r"(\d{8})$")  # trailing YYYYMMDD
 
 @dataclass
 class LoadResult:
-    fetch_path: str | None = None  # "playwright" | "manual_drop"
+    fetch_path: str | None = None  # "edocs" | "manual_drop"
     fetch_source_uri: str | None = None
     download_bytes: int = 0
     rows_parsed: int = 0
@@ -111,51 +115,8 @@ class LoadResult:
 
 
 # --------------------------------------------------------------------------
-# Fetch — Playwright primary, manual-drop fallback (mirrors solid_waste)
+# Fetch — autonomous edocs discovery + session fetch, manual-drop fallback
 # --------------------------------------------------------------------------
-def _try_playwright_fetch(work_dir: Path) -> tuple[bytes, str] | None:
-    work_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        from playwright.sync_api import TimeoutError as PWTimeout
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("[NC SF]   playwright not installed; skipping playwright fetch", flush=True)
-        return None
-    print(f"[NC SF]   playwright fetch attempt: {PW_URL}", flush=True)
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            try:
-                ctx = browser.new_context(accept_downloads=True)
-                page = ctx.new_page()
-                downloads: list = []
-                page.on("download", lambda d: downloads.append(d))
-                try:
-                    page.goto(PW_URL, wait_until="domcontentloaded", timeout=PW_NAV_TIMEOUT_MS)
-                except PWTimeout:
-                    print(
-                        "[NC SF]   playwright: navigation timed out (TCP block expected)",
-                        flush=True,
-                    )
-                    return None
-                page.wait_for_timeout(1500)
-                if not downloads:
-                    return None
-                d = downloads[0]
-                target = (
-                    work_dir
-                    / f"playwright_{int(time.time())}_{d.suggested_filename or 'download.xlsx'}"
-                )
-                d.save_as(str(target))
-                body = target.read_bytes()
-                return body, str(target.relative_to(ROOT))
-            finally:
-                browser.close()
-    except Exception as e:
-        print(f"[NC SF]   playwright fetch failed: {type(e).__name__}: {e}", flush=True)
-        return None
-
-
 def _newest_manual_drop() -> Path | None:
     if not MANUAL_DROP_DIR.exists():
         return None
@@ -168,18 +129,33 @@ def _newest_manual_drop() -> Path | None:
 
 
 def fetch_source() -> tuple[bytes, str, str]:
-    pw = _try_playwright_fetch(MANUAL_DROP_DIR)
-    if pw is not None:
-        body, where = pw
-        print(f"[NC SF]   playwright succeeded; {len(body):,} bytes via {where}", flush=True)
-        return body, "playwright", PW_URL
+    """Return (xlsx_bytes, fetch_path_label, source_uri_or_path).
 
+    Primary path: discover the current docid and fetch the XLSX from edocs in
+    a browser session (`scrapers.state._nc_edocs.fetch_report_xlsx`). On any
+    failure there, fall back to the newest manual-drop file. Raises only if
+    BOTH the autonomous fetch and the manual-drop pickup come up empty."""
+    # 1) Autonomous: discover current docid + session-fetch from edocs.
+    try:
+        body, docid, url = fetch_report_xlsx(
+            "septage_firm", log=lambda m: print(f"[NC SF]   {m}", flush=True)
+        )
+        print(f"[NC SF]   edocs fetch OK: docid={docid} ({len(body):,} bytes)", flush=True)
+        return body, "edocs", url
+    except Exception as e:
+        print(
+            f"[NC SF]   autonomous edocs fetch failed ({type(e).__name__}: {e}); "
+            "falling back to manual drop",
+            flush=True,
+        )
+
+    # 2) Fall back to manual-drop pickup.
     f = _newest_manual_drop()
     if f is None:
         raise RuntimeError(
-            f"NC DEQ Septage Firm: no manual drop found at "
-            f"{MANUAL_DROP_DIR.relative_to(ROOT)} and Playwright was blocked. "
-            "Drop the XLSX from a real browser session and re-run."
+            f"NC DEQ Septage Firm: autonomous edocs fetch failed and no manual "
+            f"drop found at {MANUAL_DROP_DIR.relative_to(ROOT)}. Drop the XLSX "
+            "from a real browser session and re-run."
         )
     body = f.read_bytes()
     print(f"[NC SF]   manual-drop pickup: {f.relative_to(ROOT)}  ({len(body):,} bytes)", flush=True)

@@ -136,18 +136,21 @@ The scraper steps run in this order:
 | 7 | `scrapers.federal.epa_cwns` | Playwright session timeout; APEX `<select>` selector changed; survey iframe URL changed |
 | 8 | `scrapers.state.tceq_msw_xls` | TCEQ moved the XLS URL; xlrd choke on a corrupt cell |
 | 9 | `scrapers.state.nc_deq_non_discharge` | ArcGIS REST endpoint URL changed; FeatureServer paginated record-cap changed |
-| 10 | `scrapers.state.nc_deq_solid_waste` | **edocs WAF block (every run)**. See §5 below for the manual-drop workflow. |
-| 11 | `scrapers.state.nc_deq_septage_firm` | Same edocs WAF block as step 10. |
+| 10 | `scrapers.state.nc_deq_solid_waste` | Autonomous edocs fetch (discover current docid → browser-session download). On failure, soft-fails (`continue-on-error`) and the §5 freshness gate catches staleness. See §5. |
+| 11 | `scrapers.state.nc_deq_septage_firm` | Same autonomous edocs path as step 10. |
 
-**Steps 10 + 11 always fail in CI** — edocs.deq.nc.gov enforces a
-network-layer WAF block and the runner filesystem has no manual XLSX.
-Both steps carry `continue-on-error: true` so the workflow proceeds
-past them. The freshness gate immediately after step 11
-(`orchestration.verify_nc_manual_drop_freshness`) then confirms that
-the operator already ran those two scrapers locally within the last
-7 days — if not, the workflow halts there with a runbook-pointer
-error before the resolver runs. The operator's local-drop procedure
-lives in §5 below.
+**Steps 10 + 11 now fetch autonomously** from edocs on the US runner
+(discover the current docid via the DEQ website, then download the XLSX
+in a browser session — see §5). They still carry
+`continue-on-error: true` as a safety net: if the autonomous fetch
+fails (DEQ restructures the linking page, an edocs outage, a schema
+surprise), the step soft-fails and the workflow proceeds. The freshness
+gate immediately after step 11
+(`orchestration.verify_nc_manual_drop_freshness`) then confirms BOTH NC
+sources have a successful `scraper_run` within the last 7 days — so a
+soft-failed fetch with no recent data halts the workflow before the
+resolver runs. If you see a halt there, §5 has the manual-drop fallback
+procedure.
 
 If you see a scraper failure on steps **6, 7, 8, or 9**, that's
 unexpected:
@@ -265,18 +268,33 @@ four secrets (SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD).
 
 ---
 
-## 5. Manual-drop fallback (NC SW + NC SF)
+## 5. NC DEQ rosters — autonomous fetch (primary) + manual-drop fallback
 
-This procedure runs every month until edocs.deq.nc.gov stops blocking
-Playwright at the network layer (no ETA — the block has held since
-Phase 2 step 3, the load-bearing operational reality).
+**Primary path (automated).** The two NC scraper steps (10 + 11) now
+fetch their XLSX autonomously from edocs on the US GitHub runner. Each
+scraper discovers the *current* `docid` — primarily by scraping the
+public DEQ "Solid Waste Facility Lists" page for the live edocs link,
+with an edocs folder browse as the fallback — then downloads the file
+in a real browser session (the docid URL needs the WebLink session
+cookies). The historic "edocs network block" was **geographic**, not a
+network-layer WAF: a US-region egress reaches edocs fine (proven by the
+Task 3 session probe + the 2026-06-02 discovery probe; see the
+build_log entry and `scrapers/state/_nc_edocs.py`). On a normal month,
+**no operator action is needed for NC** — the cron picks up the current
+rosters by itself.
+
+**Safety nets (still in force).** Until the automation proves out
+across ≥ 2 live cron cycles, the two scraper steps keep
+`continue-on-error: true` and the freshness gate stays wired. If the
+autonomous fetch fails (DEQ restructures the linking page, an edocs
+outage, a schema surprise), the step soft-fails, the workflow proceeds,
+and the freshness gate catches any staleness before the resolver runs.
+That is when the manual-drop fallback below comes into play.
 
 ### Workflow contract (current)
 
 The cron's two NC scraper steps (10 + 11) carry `continue-on-error: true`
-— they always fail in CI because the runner filesystem has no manual
-XLSX, but the workflow proceeds past them. Immediately after step 11,
-a freshness gate runs:
+as a safety net. Immediately after step 11, a freshness gate runs:
 
 ```
 python -m orchestration.verify_nc_manual_drop_freshness
@@ -302,22 +320,31 @@ below to drop the missing XLSX(s) and re-trigger. The gate halts
 
 ### Step-by-step
 
-1. **On your workstation** (not in CI — CI has no manual drops), open
-   a real browser and authenticate to NC DEQ if needed. The two
-   files don't require login but they require a real-browser session
-   with cookies.
+Use this **only** when the freshness gate halts the workflow — i.e. the
+autonomous fetch did not land fresh NC data and you need to get the
+current rosters into Supabase by hand.
 
-2. **Download the two XLSX files** from edocs:
+1. **On your workstation**, open a real browser. The two files don't
+   require login but they do require a real-browser session with
+   cookies (a bare download link bounces to `Error.aspx`).
 
-   | Source | edocs URL | Save as |
-   |---|---|---|
-   | NC SW | <https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132701&dbid=0&repo=WasteManagement> | `nc_deq_solid_waste_YYYY-MM-DD.xlsx` |
-   | NC SF | <https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132702&dbid=0&repo=WasteManagement> | `nc_deq_septage_firm_YYYY-MM-DD.xlsx` |
+2. **Get the CURRENT download links** from the DEQ "Solid Waste
+   Facility Lists" page — do **not** reuse an old `docid`, which
+   rotates every publication:
 
-   **VPN note:** if you're not on a US-anchor connection, the edocs
-   page may fail with the same WAF block you'd hit from CI. Use a
-   US-residential VPN exit if needed. The block is geo-related
-   secondarily to the network-layer signature.
+   <https://www.deq.nc.gov/about/divisions/waste-management/solid-waste-section/solid-waste-permitted-facility-information-and-guidance/solid-waste-facility-lists>
+
+   That page links the **Solid Waste Permitted Facilities** roster and
+   the **Septage Firm** roster, each to its live
+   `edocs.deq.nc.gov/.../ElectronicFile.aspx?docid=<current>` URL. Save
+   them as `nc_deq_solid_waste_YYYY-MM-DD.xlsx` and
+   `nc_deq_septage_firm_YYYY-MM-DD.xlsx`.
+
+   **Geographic-access note:** edocs is reachable from a US connection.
+   If you're outside the US and the page or download fails, use a US
+   VPN exit. This is the same geographic constraint the automated fetch
+   sidesteps by running on the US GitHub runner — there is no
+   network-layer WAF.
 
 3. **Drop the files** into the loader's pickup directory:
 
@@ -346,19 +373,20 @@ below to drop the missing XLSX(s) and re-trigger. The gate halts
    gh workflow run "Monthly Refresh"
    ```
 
-   The cron's NC SW + NC SF steps will fail in CI again (no manual
-   drops in the runner) — that's **expected and absorbed** by their
-   `continue-on-error: true` flag. The freshness gate immediately
-   afterward will pass because step 4 of this procedure landed
-   successful scraper_runs in Supabase within the 7-day window.
-   The drift detector + resolver + CSV export then run normally and
-   the refresh PR opens.
+   On the US runner the NC steps will normally fetch the current
+   rosters autonomously and succeed outright. Even if the autonomous
+   fetch fails again, the freshness gate immediately afterward passes
+   because step 4 of this procedure landed successful scraper_runs in
+   Supabase within the 7-day window — and the `continue-on-error: true`
+   flag absorbs the soft failure either way. The drift detector +
+   resolver + CSV export then run normally and the refresh PR opens.
 
 ### Alternative: full local refresh
 
-If the workflow-dispatch path is blocked or you want the cleanest
-operational path until edocs unblocks, run the entire pipeline from
-your workstation:
+If the workflow-dispatch path is blocked or you want a fully hands-on
+run, run the entire pipeline from your workstation (the NC scrapers
+attempt the autonomous edocs fetch first, then fall back to any manual
+drop you have staged):
 
 ```bash
 # Scrapers (federal + TX + NC)

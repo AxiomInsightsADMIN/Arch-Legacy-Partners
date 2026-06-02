@@ -7,22 +7,28 @@ DEQ DWM and upserts one row per facility into `raw_facility_record` with
 
 Access path
 -----------
-The data lives behind NC DEQ's Laserfiche document repository at
-`edocs.deq.nc.gov` (docid=2132701). The repository host TCP-blocks our
-egress IP for both vanilla `requests` and headless Playwright — the
-block is at the network layer, not the application layer (see
-`docs/nc_deq_audit.md` section C and the Phase 2 step 3 entry in
-`docs/build_log.md`). Per the locked operational rule, we do NOT
-attempt anti-detection escalation, IP rotation, or proxy use.
+The data lives in NC DEQ's Laserfiche WebLink document repository at
+`edocs.deq.nc.gov/WasteManagement/`, addressed by a numeric `docid`
+that rotates every publication period (file names carry a `_YYYYMMDD`
+suffix), so the docid is discovered at run time, never hardcoded. The
+loader fetches the roster autonomously:
 
-Two-path fetch model:
-
-  1. Try Playwright fetch first. Forward-compat — if NC DEQ ever
-     relaxes the WAF rule we pick the file up automatically.
-  2. On Playwright failure, fall back to the manual-drop pickup at
-     `local/manual_drops/nc_deq_solid_waste/`. Ryan drops the latest
-     XLSX into that directory from a real browser session; the loader
-     uses the newest file by mtime.
+  1. Discover the current docid via `scrapers.state._nc_edocs`: the
+     primary path scrapes the public DEQ "Solid Waste Facility Lists"
+     web page (reachable + robots-permissive) for the current edocs
+     `docid=` link; the fallback browses the edocs folder that holds
+     the roster. See `docs/nc_deq_audit.md` and the 2026-06-02
+     build_log entry.
+  2. Fetch the XLSX from edocs inside a real browser session via
+     Playwright (the docid URL bounces to Error.aspx without the
+     WebLink session cookies). edocs is reachable from a US egress
+     (e.g. the GitHub Actions runner); the historic "network block"
+     was geographic, not a network-layer WAF. No anti-detection
+     escalation, IP rotation, or proxy use.
+  3. On any autonomous-fetch failure, fall back to the manual-drop
+     pickup at `local/manual_drops/nc_deq_solid_waste/`: drop the
+     latest XLSX from a real browser session and the loader uses the
+     newest file by mtime.
 
 Source schema (verified from 2026-05-11 manual drop)
 ----------------------------------------------------
@@ -70,6 +76,7 @@ from scrapers._loader_utils import (  # noqa: E402
     get_source_id,
     hash_payload,
 )
+from scrapers.state._nc_edocs import fetch_report_xlsx  # noqa: E402
 
 ROOT = _PROJECT_ROOT
 
@@ -84,20 +91,16 @@ EXPECTED_STATE = "NC"
 BATCH_SIZE = 500
 
 # Manual-drop directory the operator (Ryan) populates from a real browser
-# session when edocs blocks our automated egress.
+# session if the autonomous edocs fetch ever fails.
 MANUAL_DROP_DIR = ROOT / "local" / "manual_drops" / "nc_deq_solid_waste"
 
-# Playwright target (will currently fail — kept for forward-compat).
-PW_URL = (
-    "https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx"
-    "?docid=2132701&dbid=0&repo=WasteManagement"
-)
-PW_NAV_TIMEOUT_MS = 30_000  # be modest; we expect failure
+# The edocs docid is discovered at run time (never hardcoded) and the XLSX is
+# fetched in a browser session -- both live in scrapers.state._nc_edocs.
 
 
 @dataclass
 class LoadResult:
-    fetch_path: str | None = None  # "playwright" | "manual_drop"
+    fetch_path: str | None = None  # "edocs" | "manual_drop"
     fetch_source_uri: str | None = None
     download_bytes: int = 0
     rows_parsed: int = 0
@@ -116,58 +119,8 @@ class LoadResult:
 
 
 # --------------------------------------------------------------------------
-# Fetch — Playwright primary, manual-drop fallback
+# Fetch — autonomous edocs discovery + session fetch, manual-drop fallback
 # --------------------------------------------------------------------------
-def _try_playwright_fetch(work_dir: Path) -> tuple[bytes, str] | None:
-    """Attempt to fetch the XLSX via Playwright. Returns (bytes,
-    saved_path_or_url) on success, None on failure. NO escalation —
-    a connection timeout or any exception returns None and the caller
-    falls back to manual-drop pickup."""
-    work_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        from playwright.sync_api import TimeoutError as PWTimeout
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("[NC SW]   playwright not installed; skipping playwright fetch", flush=True)
-        return None
-    print(f"[NC SW]   playwright fetch attempt: {PW_URL}", flush=True)
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            try:
-                ctx = browser.new_context(accept_downloads=True)
-                page = ctx.new_page()
-                downloads: list = []
-                page.on("download", lambda d: downloads.append(d))
-                try:
-                    page.goto(PW_URL, wait_until="domcontentloaded", timeout=PW_NAV_TIMEOUT_MS)
-                except PWTimeout:
-                    print(
-                        "[NC SW]   playwright: navigation timed out (TCP block expected)",
-                        flush=True,
-                    )
-                    return None
-                page.wait_for_timeout(1500)
-                if not downloads:
-                    return None
-                d = downloads[0]
-                target = (
-                    work_dir
-                    / f"playwright_{int(time.time())}_{d.suggested_filename or 'download.xlsx'}"
-                )
-                d.save_as(str(target))
-                body = target.read_bytes()
-                return body, str(target.relative_to(ROOT))
-            finally:
-                browser.close()
-    except Exception as e:
-        # `requests.exceptions.ConnectionError` from the underlying CDP
-        # transport sometimes surfaces here too. We treat any exception as
-        # "playwright failed; fall back" — never as something to retry.
-        print(f"[NC SW]   playwright fetch failed: {type(e).__name__}: {e}", flush=True)
-        return None
-
-
 def _newest_manual_drop() -> Path | None:
     """Return the most recently modified .xlsx in the manual-drop dir,
     or None if the dir is empty / missing."""
@@ -183,22 +136,32 @@ def _newest_manual_drop() -> Path | None:
 
 def fetch_source() -> tuple[bytes, str, str]:
     """Return (xlsx_bytes, fetch_path_label, source_uri_or_path).
-    Raises if neither the Playwright path nor a manual drop produces
-    a file."""
-    # 1) Try Playwright (forward-compat; expected to fail today)
-    pw = _try_playwright_fetch(ROOT / "local" / "manual_drops" / "nc_deq_solid_waste")
-    if pw is not None:
-        body, where = pw
-        print(f"[NC SW]   playwright succeeded; {len(body):,} bytes via {where}", flush=True)
-        return body, "playwright", PW_URL
 
-    # 2) Fall back to manual-drop pickup
+    Primary path: discover the current docid and fetch the XLSX from edocs in
+    a browser session (`scrapers.state._nc_edocs.fetch_report_xlsx`). On any
+    failure there, fall back to the newest manual-drop file. Raises only if
+    BOTH the autonomous fetch and the manual-drop pickup come up empty."""
+    # 1) Autonomous: discover current docid + session-fetch from edocs.
+    try:
+        body, docid, url = fetch_report_xlsx(
+            "solid_waste", log=lambda m: print(f"[NC SW]   {m}", flush=True)
+        )
+        print(f"[NC SW]   edocs fetch OK: docid={docid} ({len(body):,} bytes)", flush=True)
+        return body, "edocs", url
+    except Exception as e:
+        print(
+            f"[NC SW]   autonomous edocs fetch failed ({type(e).__name__}: {e}); "
+            "falling back to manual drop",
+            flush=True,
+        )
+
+    # 2) Fall back to manual-drop pickup.
     f = _newest_manual_drop()
     if f is None:
         raise RuntimeError(
-            f"NC DEQ Solid Waste: no manual drop found at "
-            f"{MANUAL_DROP_DIR.relative_to(ROOT)} and Playwright was blocked. "
-            "Drop the XLSX from a real browser session and re-run."
+            f"NC DEQ Solid Waste: autonomous edocs fetch failed and no manual "
+            f"drop found at {MANUAL_DROP_DIR.relative_to(ROOT)}. Drop the XLSX "
+            "from a real browser session and re-run."
         )
     body = f.read_bytes()
     print(f"[NC SW]   manual-drop pickup: {f.relative_to(ROOT)}  ({len(body):,} bytes)", flush=True)

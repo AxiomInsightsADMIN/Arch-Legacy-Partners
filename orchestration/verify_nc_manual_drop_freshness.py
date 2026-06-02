@@ -5,15 +5,20 @@ drift detector. Confirms that BOTH NC manual-drop sources had a
 successful scraper_run within the last 7 days.
 
 Why this gate exists:
-  - edocs.deq.nc.gov enforces a network-layer WAF block that prevents
-    Playwright (CI runner OR operator workstation) from completing the
-    fetch automatically.
-  - The two NC scraper steps in the workflow are flagged
-    `continue-on-error: true` so CI doesn't fail every month at those
-    expected blocks.
+  - The two NC DEQ DWM rosters are now fetched autonomously from edocs
+    by the NC scraper steps (discover the current docid -> browser-
+    session download; see scrapers.state._nc_edocs). edocs IS reachable
+    from the US runner -- the historic "network block" was geographic,
+    not a network-layer WAF.
+  - This gate stays in place as a SAFETY NET while that automation
+    proves out across >= 2 live cron cycles. The two NC scraper steps
+    keep `continue-on-error: true` so a transient autonomous-fetch
+    failure (or a manual-drop month) does not fail the whole workflow
+    at those steps.
   - WITHOUT this gate, the workflow would happily run the resolver
-    against stale NC data when the operator forgot the manual drop —
-    poisoning canonical_facility with a multi-month-old snapshot.
+    against stale NC data if BOTH the autonomous fetch and any manual
+    drop were missing -- poisoning canonical_facility with a
+    multi-month-old snapshot.
 
 The gate checks freshness, not just presence:
   - SELECT s.slug, MAX(sr.finished_at)
