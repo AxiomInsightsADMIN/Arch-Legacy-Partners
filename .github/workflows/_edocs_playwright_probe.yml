@@ -1,0 +1,137 @@
+name: _edocs_playwright_probe (throwaway session test)
+
+# THROWAWAY Playwright session probe. Task 1's stateless `requests` probe
+# REACHED edocs from the US runner (got 302 -> Error.aspx / 416), proving there
+# is no network/TCP block — the failure was app-layer. This probe tests the
+# app/session layer: can a REAL browser session (cookies from the landing page)
+# on a US GitHub runner actually pull the NC XLSX files? workflow_dispatch only.
+# No secrets, no Supabase, no data load. DELETE after capturing the verdict.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: edocs playwright session probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright + chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Probe edocs with a browser session
+        run: |
+          python - <<'PY'
+          import os
+          from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+          BASE = "https://edocs.deq.nc.gov/WasteManagement/"
+          DOCS = [
+              ("2132701", "https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132701&dbid=0&repo=WasteManagement"),
+              ("2132702", "https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132702&dbid=0&repo=WasteManagement"),
+          ]
+
+
+          def probe_doc(context, docid, url):
+              print("-" * 72)
+              print(f"docid={docid} -> {url}")
+              page = context.new_page()
+              download = None
+              try:
+                  with page.expect_download(timeout=15000) as dl:
+                      try:
+                          page.goto(url, wait_until="commit", timeout=30000)
+                      except Exception as e:
+                          print(f"  goto raised (normal if a download started): {type(e).__name__}: {e}")
+                  download = dl.value
+              except PWTimeout:
+                  download = None
+
+              if download is not None:
+                  try:
+                      path = download.path()
+                      size = os.path.getsize(path) if path else 0
+                      with open(path, "rb") as fh:
+                          head = fh.read(8)
+                      is_xlsx = head[:4] == b"PK\x03\x04"
+                      print(f"  DOWNLOAD fired: name={download.suggested_filename!r} size={size} first8={head!r} is_xlsx={is_xlsx}")
+                      page.close()
+                      return {"docid": docid, "got_xlsx": bool(is_xlsx and size > 0), "size": size}
+                  except Exception as e:
+                      print(f"  download captured but reading it failed: {type(e).__name__}: {e}")
+                      page.close()
+                      return {"docid": docid, "got_xlsx": False, "size": 0}
+
+              # No download fired — settle the page and report what it actually was.
+              try:
+                  page.wait_for_load_state("networkidle", timeout=30000)
+              except Exception:
+                  pass
+              cur = title = text = None
+              try:
+                  cur = page.url
+              except Exception:
+                  pass
+              try:
+                  title = page.title()
+              except Exception:
+                  pass
+              try:
+                  text = page.inner_text("body")[:300].replace("\n", " ")
+              except Exception:
+                  pass
+              print(f"  NO download. final_url={cur}")
+              print(f"  title={title!r}")
+              print(f"  body_snippet={text!r}")
+              page.close()
+              return {"docid": docid, "got_xlsx": False, "size": 0}
+
+
+          def main():
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True)
+                  context = browser.new_context(accept_downloads=True)
+
+                  print("=" * 72)
+                  print(f"BASE landing page: {BASE}")
+                  bp = context.new_page()
+                  try:
+                      resp = bp.goto(BASE, wait_until="networkidle", timeout=30000)
+                      print(f"  status={resp.status if resp else None} final_url={resp.url if resp else None}")
+                      print(f"  title={bp.title()!r}")
+                      try:
+                          print(f"  body_snippet={bp.inner_text('body')[:300].replace(chr(10), ' ')!r}")
+                      except Exception:
+                          pass
+                      print(f"  cookies_after_landing={len(context.cookies())}")
+                  except Exception as e:
+                      print(f"  base goto error: {type(e).__name__}: {e}")
+                  bp.close()
+
+                  results = [probe_doc(context, docid, url) for docid, url in DOCS]
+
+                  context.close()
+                  browser.close()
+
+              print("=" * 72)
+              print("SUMMARY")
+              all_ok = True
+              for r in results:
+                  verdict = "XLSX RETRIEVED" if r["got_xlsx"] else "NO XLSX"
+                  print(f"  docid={r['docid']}: got_xlsx={r['got_xlsx']} size={r['size']} -> {verdict}")
+                  all_ok = all_ok and r["got_xlsx"]
+              print("OVERALL:", "PLAYWRIGHT FETCH WORKS - NC automation viable from US runner" if all_ok else "PLAYWRIGHT DID NOT RETRIEVE XLSX - manual-drop posture stays")
+
+
+          main()
+          PY
