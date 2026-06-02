@@ -6,6 +6,22 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-06-01 — Preflight secrets hardening after cron failure
+
+First scheduled Monthly Refresh run (cron 0 9 1 * *) failed at step 6 (EPA ECHO scraper) in 49 seconds. Root cause: GitHub Actions repository secrets were never populated for scheduled runs. All SUPABASE_* environment variables rendered as empty strings, and `int(os.environ["SUPABASE_DB_PORT"])` in `_loader_utils.db_connect()` threw a confusing mid-scraper `ValueError` on an empty string.
+
+Diagnosis run ID: 26762239918. Log archived at `local/_monthly_refresh_failure_2026-06-01.log` (gitignored).
+
+Two-part fix landed in commit `caf586d`:
+
+1. `scrapers/_loader_utils.py` — added secret validation loop in `db_connect()`. Checks the five SUPABASE_DB_* variables in order and raises `RuntimeError` with a clear message naming the missing variable. Catches both unset and empty-string (which is how Actions renders an unpopulated secret).
+
+2. `.github/workflows/monthly_refresh.yml` — new step "Preflight: verify required secrets" inserted between dependency install and Playwright install. Inline Python checks all 9 required variables (SUPABASE_URL, the five SUPABASE_DB_*, SUPABASE_SERVICE_ROLE_KEY, BRAVE_API_KEY, ANTHROPIC_API_KEY). Exits 1 listing only the names of any missing variables — never values. SMTP_* and ALERT_EMAIL are excluded because the alert step soft-skips when those are unset.
+
+Effect: a missing secret now surfaces as one clear preflight error in seconds, not as a mid-scraper ValueError 49 seconds in. The NC manual-drop verification gate at step 12 will now be reachable on the next run after Ryan populates the secrets and performs the June manual drops.
+
+---
+
 ## 2026-05-15 — Pre-handoff: RLS default-deny on public schema tables
 
 Supabase's Advisors page was flagging `rls_disabled_in_public` on all
