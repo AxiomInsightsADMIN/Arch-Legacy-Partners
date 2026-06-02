@@ -1,0 +1,71 @@
+name: Monthly Refresh reminder
+
+# Opens a GitHub issue on the 25th of each month reminding the operator to
+# perform the NC manual XLSX drops BEFORE the Monthly Refresh cron fires on
+# the 1st at 09:00 UTC. The two NC DEQ DWM sources (Solid Waste, Septage Firm)
+# cannot be scraped in CI (edocs.deq.nc.gov blocks the automated fetch), so a
+# human must drop fresh files and load them into Supabase or the refresh halts
+# at the freshness gate. Needs only the auto-provided GITHUB_TOKEN.
+on:
+  schedule:
+    - cron: "0 13 25 * *"   # 25th of each month, 13:00 UTC (Korea evening / US morning)
+  workflow_dispatch:          # manual trigger so we can test without waiting for the 25th
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  open-reminder:
+    name: Open NC manual-drop reminder issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create reminder issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Ensure the labels exist (idempotent — --force creates or updates).
+          gh label create "monthly-refresh" --color "1D76DB" --description "Monthly Refresh cron coordination" --force
+          gh label create "operator-action" --color "D93F0B" --description "Requires a human operator action" --force
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "Monthly Refresh prep — NC manual drops required by month-end" \
+            --label "monthly-refresh" \
+            --label "operator-action" \
+            --body "$(cat <<'EOF'
+          ## Monthly Refresh — NC manual drops due before month-end
+
+          The Monthly Refresh cron fires on the **1st at 09:00 UTC**. The two NC DEQ DWM sources (Solid Waste, Septage Firm) cannot be scraped in CI — edocs.deq.nc.gov blocks the automated fetch — so an operator must drop fresh XLSX files **before** the cron runs. If the drops are missing or stale, the freshness gate halts the workflow before the resolver (canonical_facility is never poisoned, but the refresh won't finish).
+
+          **Full procedure:** [docs/runbook_monthly_refresh.md §5](https://github.com/AxiomInsightsADMIN/Arch-Legacy-Partners/blob/main/docs/runbook_monthly_refresh.md)
+
+          ### Source files to download from edocs (use a non-blocked / US connection)
+          - Solid Waste — https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132701&dbid=0&repo=WasteManagement
+          - Septage Firm — https://edocs.deq.nc.gov/WasteManagement/ElectronicFile.aspx?docid=2132702&dbid=0&repo=WasteManagement
+
+          ### Checklist
+          - [ ] Download both XLSX files from the edocs URLs above (confirm the docids are still current; see §5 if they error)
+          - [ ] Drop the file into `local/manual_drops/nc_deq_solid_waste/<file>.xlsx`
+          - [ ] Drop the file into `local/manual_drops/nc_deq_septage_firm/<file>.xlsx`
+          - [ ] Run `python -m scrapers.state.nc_deq_solid_waste`
+          - [ ] Run `python -m scrapers.state.nc_deq_septage_firm`
+          - [ ] Verify the rows landed with the SQL below (expect 2 rows)
+          - [ ] If the cron already ran and halted on the gate, re-trigger Monthly Refresh via workflow_dispatch
+
+          ### Verification SQL
+          ```sql
+          SELECT s.slug, MAX(sr.finished_at) AS latest_success
+            FROM scraper_run sr
+            JOIN source s ON s.id = sr.source_id
+           WHERE s.slug IN ('nc_deq_solid_waste_facility_list', 'nc_deq_septage_firm_list')
+             AND sr.status = 'success'
+             AND sr.finished_at > NOW() - INTERVAL '7 days'
+           GROUP BY s.slug;
+          ```
+          Fewer than 2 rows → a drop is missing or stale; the cron's "Verify NC manual-drop data present" gate will fail until both are loaded.
+
+          ---
+          Auto-opened by `.github/workflows/monthly_refresh_reminder.yml` on the 25th (cron `0 13 25 * *`). Close once both drops are loaded and verified.
+          EOF
+          )"
