@@ -23,6 +23,10 @@ jobs:
       - name: Create reminder issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_REPO gives every gh command its repo context without a checkout,
+          # so `gh label create` (which has no --repo flag) doesn't try to infer
+          # the repo from a local git remote and fail with "not a git repository".
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # Ensure the labels exist (idempotent — --force creates or updates).
