@@ -6,6 +6,97 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-06-02 — NC DEQ rosters fetch autonomously from edocs (manual-drop requirement eliminated)
+
+The two NC DEQ DWM rosters (Solid Waste Permitted Facilities, Septage
+Firm) now fetch their source XLSX from `edocs.deq.nc.gov` automatically
+in the monthly cron — no operator manual drop on a normal month.
+
+### Discovery investigation (done first, before any scraper edit)
+
+The file names carry a publication date (`_20260428`), so the edocs
+`docid` rotates each period and cannot be hardcoded. Throwaway
+`workflow_dispatch` probes (since removed) established two viable
+discovery mechanisms from the US runner:
+
+- **Primary — DEQ website.** The public "Solid Waste Facility Lists"
+  page (`www.deq.nc.gov`, reachable + robots-permissive) links each
+  roster to its *current* `ElectronicFile.aspx?docid=` URL. DEQ updates
+  that link when a new file is published, so it is the canonical
+  current-file pointer — robust to both docid rotation and any edocs
+  folder reshuffle.
+- **Fallback — edocs folder.** The WebLink folder "Permitting Branch
+  Webpage" (id `1684679`, under Solid Waste → Solid Waste Program →
+  Website Files) holds both rosters; browse it in-session and pick the
+  document whose name starts with `PermittedFacilityList` /
+  `PermittedSeptageFirm` (newest by trailing `_YYYYMMDD`).
+
+Both mechanisms independently yielded docids 2132701 / 2132702, which
+downloaded as valid XLSX and matched the known files.
+
+### Wiring (commit `b98c722`, CI green)
+
+- New shared helper `scrapers/state/_nc_edocs.py`: `discover_docids_via_website()`,
+  the folder fallback, and the proven session fetch (land on the WebLink
+  welcome page for the four session cookies, then download
+  `ElectronicFile.aspx?docid=<current>` in the SAME browser context — a
+  stateless request bounces to `Error.aspx` — and validate `PK\x03\x04`).
+- `nc_deq_solid_waste.py` + `nc_deq_septage_firm.py` rewired: discover →
+  session-fetch → existing parse/dedupe/upsert (unchanged). The old
+  no-session `_try_playwright_fetch` (which always bounced to Error.aspx)
+  is gone. Manual drop stays as the final fallback.
+- **Corrected the stale "network-layer WAF block" claim** in both
+  scrapers, in `orchestration/verify_nc_manual_drop_freshness.py`, and in
+  `docs/runbook_monthly_refresh.md` §5 / §3.1. The original Phase 2 audit
+  probed edocs from a non-US workstation IP and saw TCP timeouts; that was
+  a **geographic** block, not a network-layer WAF. The US GitHub runner
+  reaches edocs fine.
+
+### Verification
+
+- A no-DB throwaway workflow exercised the real scraper fetch+parse on the
+  US runner: SW = 435 rows × 13 cols, SF = 759 rows × 9 cols, content-date
+  extracted for both. PASS.
+- **Live `monthly_refresh` (run `26806370639`)** ran the full pipeline
+  green through the resolver: NC scrapers fetched from edocs autonomously
+  → wrote `raw_facility_record` → freshness gate PASS → drift detector
+  `overall_status=pass` (SW 435, SF 759, NC-ND 1,259 rows; 0 pauses) →
+  geocoder backfill → resolver `--rebuild --force` → CSV export
+  (`facilities_primary.csv` ≈ 1,970 in-scope). Refresh branch
+  `refresh/2026-06-02` pushed; audit PR #5 opened.
+
+### Two non-NC issues surfaced during the live test
+
+1. **Transient Supabase pooler error** (`EDBHANDLEREXITED) DbHandler
+   exited`) in `geocoder_backfill.py`'s concurrent worker connections on
+   the first attempt — cleared on a single re-dispatch (the backfill is
+   idempotent against `geocoding_cache`). Infra flake, not a code defect;
+   same handling as the transient CI Docker-pull flake.
+2. **`Open PR back to main` step fails** with "GitHub Actions is not
+   permitted to create or approve pull requests." Pre-existing repo
+   setting, unrelated to NC. PR #5 was opened manually as a stopgap.
+   **ACTION (Ryan):** enable Settings → Actions → General → Workflow
+   permissions → "Allow GitHub Actions to create and approve pull
+   requests" so future crons self-open the refresh PR.
+
+### Secrets
+
+The repository Actions secrets that the 2026-06-01 cron was missing
+(`SUPABASE_URL`, the five `SUPABASE_DB_*`, `SUPABASE_SERVICE_ROLE_KEY`,
+`SUPABASE_PUBLISHABLE_KEY`, `BRAVE_API_KEY`; `ANTHROPIC_API_KEY` already
+set) were populated from the canonical `.env`. The preflight gate now
+passes.
+
+### Safety nets retained (per plan: keep until ≥ 2 live cron cycles prove out)
+
+The two NC scraper steps keep `continue-on-error: true` and the freshness
+gate (`verify_nc_manual_drop_freshness`) stays wired, so a future
+autonomous-fetch failure soft-fails and is caught before the resolver.
+`monthly_refresh_reminder.yml` and the gate step in `monthly_refresh.yml`
+were left untouched.
+
+---
+
 ## 2026-06-01 — Preflight secrets hardening after cron failure
 
 First scheduled Monthly Refresh run (cron 0 9 1 * *) failed at step 6 (EPA ECHO scraper) in 49 seconds. Root cause: GitHub Actions repository secrets were never populated for scheduled runs. All SUPABASE_* environment variables rendered as empty strings, and `int(os.environ["SUPABASE_DB_PORT"])` in `_loader_utils.db_connect()` threw a confusing mid-scraper `ValueError` on an empty string.
