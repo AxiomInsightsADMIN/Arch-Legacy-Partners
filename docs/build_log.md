@@ -77,6 +77,42 @@ rows. All three `v_accepts_*` views populate again. Exports regenerated
 
 Full evaluation in `scope_evaluation_2026-06-13.md` (untracked, internal).
 
+### Addendum — fix merged and live-verified
+
+The permanent fix is now on `main` and proven against a live refresh.
+
+- **PR #6** "Fix accepts_* wipe on resolver rebuild: carry-forward +
+  postcondition", merged into `main` with merge commit `5e79b0b`.
+- **Amend note:** the original local commit `db238a7` carried two files
+  (`monthly_refresh.yml`, `build_log.md`) truncated by a file-sync race
+  during staging. Amended to `e289e71` with the corrected tails before
+  push; verified +24/-0 on the workflow and +73/-0 on the build log vs
+  `main` (pure additions, no loss of existing content). PR #6 merged
+  `e289e71`.
+- **Live proof:** `workflow_dispatch` run **27453090305** (Monthly Refresh
+  on `main`) completed green end to end. The three success criteria:
+  - *Carry forward acceptance flags* — 1,952 prior verdict keys loaded;
+    1,975 rebuilt rows with NULL flags, **1,960 matched a prior verdict**,
+    15 unmatched (genuinely new/renamed facilities); 1,960 canonical
+    updates committed. Nonzero match, exit 0. PASS.
+  - *Postcondition: acceptance flags present in export* —
+    **1,960/1,975 export rows carry ≥1 acceptance verdict**. PASS.
+    (Slightly above the ~1,964/1,970 estimate because the monthly scrape
+    grew the canonical set to 1,975; the 15 new/renamed rows correctly
+    carry NULL rather than guessed verdicts.)
+  - *Green run + dated auto-PR with populated flags* — refresh branch
+    `refresh/2026-06-13` pushed, opened as **PR #7** "Monthly refresh
+    2026-06-13". Diff was the three expected refresh artifacts only
+    (both export CSVs + `drift_report.json`); accepts Yes counts
+    508/232/235 match the Phase 4 restore; drift was normal source growth
+    (ECHO 91,981→93,100, no source paused). Merged with merge commit
+    `129e654`. PASS.
+- `main`'s `exports/facilities_primary.csv` now carries populated accepts
+  columns (1,960/1,975 with ≥1 verdict; septage 508 Yes / 9 No) ahead of
+  the July 1 cron, whose carry-forward step reads this committed CSV.
+- Rollback reference (pushed to origin): tag
+  `pre-enrichment-restore-2026-06-13` at `b884ee3`.
+
 ---
 
 ## 2026-06-02 — NC DEQ rosters fetch autonomously from edocs (manual-drop requirement eliminated)
