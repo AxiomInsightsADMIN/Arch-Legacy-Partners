@@ -6,6 +6,79 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-06-13 — Acceptance-flag regression found and fixed (pre-handoff scope evaluation)
+
+Pre-handoff evaluation of GitHub and Supabase surfaced a client-visible
+regression: every `canonical_facility.accepts_*` value was NULL and the
+June CSV merged in PR #5 shipped blank acceptance columns. The three
+`v_accepts_*` views were empty.
+
+### Root cause
+
+`resolver.entity_resolver --rebuild --force` TRUNCATEs `canonical_facility`
+and regenerates every row with a fresh uuid4. The Phase 4 verdicts lived on
+those rows, and `llm_enrichment_cache.content_hash` embeds the facility id,
+so all 2,893 cache entries were orphaned by the 2026-06-02 rebuild — a
+cache lookup for the rebuilt rows can never hit. The monthly workflow had
+no enrichment or promotion step after the resolver (the pipeline-level
+integration flagged in the 2026-05-14 entry was never wired into the
+workflow), so nothing restored the flags before the CSV export.
+
+### Restore (one-off, zero API cost)
+
+Rollback checkpoint tagged `pre-enrichment-restore-2026-06-13` at
+`b884ee3` before any change. Verdicts were re-applied from the gitignored
+`local/_stop4_enrichment_results.json` by exact (name, state,
+facility_type) match against the rebuilt canonicals: 1,946 clean 1:1
+matches plus duplicate-key groups with agreeing verdicts = 1,964 rows
+updated. 3 duplicate-name keys (6 rows) had conflicting Phase 4 verdicts
+and were left NULL rather than guessed. Post-restore distribution:
+septage 508 Yes / 9 No, grease 232 Yes / 25 No, portable toilet
+235 Yes / 9 No — matches the Phase 4 close report minus the 6 skipped
+rows. All three `v_accepts_*` views populate again. Exports regenerated
+(1,970 primary rows, flags present).
+
+### Permanent fix (this commit)
+
+- New `enrichment/carry_forward_accepts.py`: after a rebuild, re-applies
+  last month's verdicts from the committed `exports/facilities_primary.csv`
+  in the checkout, matching on (name, state, facility_type). Only touches
+  rows whose three flags are all NULL (never clobbers fresher verdicts),
+  skips ambiguous duplicate keys, exits 1 if the source CSV carries zero
+  verdicts. Idempotent.
+- `monthly_refresh.yml`: "Carry forward acceptance flags" step inserted
+  between the resolver rebuild and the CSV export, and a "Postcondition"
+  step after the export that fails the run if the new CSV's accepts
+  columns are 100% blank. The June regression is now loud instead of
+  silent.
+
+### Known residuals / decisions for Ryan
+
+- New facilities each month carry NULL flags until enriched (carry-forward
+  only restores known verdicts). Running `enrichment.enrich` fresh against
+  unmatched rows costs ~$5–15 per full pass (documented in
+  v1_scope_limitations §6); decide whether to wire it into the cron or
+  run it ad hoc pre-refresh. Note: Brave free tier (~2,000 queries/month)
+  is nearly exhausted by a full 1,970-facility pass.
+- Design note for Phase 2: keying `llm_enrichment_cache.content_hash` on
+  facility id makes the cache useless across rebuilds. Re-keying on stable
+  content (name + state + type) would make cache hits survive rebuilds.
+- 123 typed canonicals have NULL state and NULL source (82 transfer
+  stations, 28 composting, 8 digesters, 5 septage) — visible in
+  v_all_in_scope and the CSV with blank state, invisible to per-state
+  views. Likely discovery-promoted rows that never got state stamped.
+  Backfill or scope decision needed before handoff.
+- `facility_type_lookup` is empty and unused: normalization actually runs
+  through `resolver/_category_map.py` + `config/facility_types.yaml`.
+  schema.md's "loaders MUST normalize through this table" language is
+  wrong and needs correction in schema.md and the Handoff Playbook.
+- 6 conflicting-duplicate rows left NULL (3 name keys × 2). Candidates
+  for manual adjudication or fresh enrichment.
+
+Full evaluation in `scope_evaluation_2026-06-13.md` (untracked, internal).
+
+---
+
 ## 2026-06-02 — NC DEQ rosters fetch autonomously from edocs (manual-drop requirement eliminated)
 
 The two NC DEQ DWM rosters (Solid Waste Permitted Facilities, Septage
