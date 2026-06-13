@@ -196,9 +196,33 @@ jobs:
       - name: Resolver — full rebuild
         run: python -m resolver.entity_resolver --rebuild --force
 
+      # ----- Carry acceptance flags across the rebuild -----
+      # The rebuild TRUNCATEs canonical_facility and regenerates row ids,
+      # which orphans the Phase 4 accepts_* verdicts (the enrichment cache
+      # is keyed by the old ids). Re-apply last month's verdicts from the
+      # committed CSV in this checkout by (name, state, facility_type)
+      # match. See build log 2026-06-13.
+      - name: Carry forward acceptance flags
+        run: python -m enrichment.carry_forward_accepts
+
       # ----- CSV export -----
       - name: CSV export (primary + provenance)
         run: python -m exports.export_csv
+
+      # ----- Postcondition: export must not ship blank acceptance flags -----
+      - name: "Postcondition: acceptance flags present in export"
+        run: |
+          python - <<'PY'
+          import csv, sys
+          with open("exports/facilities_primary.csv", encoding="utf-8") as f:
+              rows = list(csv.DictReader(f))
+          cols = ("accepts_septage", "accepts_grease_trap", "accepts_portable_toilet")
+          populated = sum(1 for r in rows if any(r.get(c, "").strip() for c in cols))
+          print(f"[postcondition] {populated}/{len(rows)} export rows carry at least one acceptance verdict")
+          if rows and populated == 0:
+              print("[postcondition] FAIL: accepts_* columns are 100% blank — the 2026-06 regression has recurred.")
+              sys.exit(1)
+          PY
 
       # ----- Commit refreshed CSVs to a dated branch -----
       - name: Configure git for refresh branch
