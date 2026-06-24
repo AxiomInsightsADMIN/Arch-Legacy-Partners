@@ -6,6 +6,34 @@ decisions made, deviations from the brief (and why).
 
 ---
 
+## 2026-06-24 — Supabase Security Advisor cleanup (Security Definer View criticals + citext)
+
+Pre-Austin-handoff security hardening on the live project `jpbuibylaphzdvcxwaiu`.
+**Security Advisor criticals: 21 → 0** (plus the citext `extension_in_public`
+warning cleared, 1 → 0). The 21 public `v_*` access views were SECURITY DEFINER,
+so they bypassed the deny-all RLS on the base tables while `anon`/`authenticated`
+held SELECT — the public anon key could read the entire dataset through them.
+Fix (two migrations, applied live via MCP then committed for CI):
+
+- `20260624020435_security_invoker_views.sql` — loops every public `v_*` view:
+  `ALTER VIEW … SET (security_invoker = on)` + `REVOKE SELECT … FROM anon,
+  authenticated`. Views now respect RLS; public roles lose read access.
+- `20260624020701_move_citext.sql` — `ALTER EXTENSION citext SET SCHEMA
+  extensions`.
+
+Live verification (as `postgres`, the pipeline role): `v_all_in_scope` still
+returns **1975** (pipeline + `service_role` dashboard unaffected — both bypass
+RLS; base tables are not FORCE RLS); **21/21** views `security_invoker=on`;
+`anon`/`authenticated` SELECT grants on `v_*` = **0** (was 42); citext columns
+(`canonical_facility.email`, `facility_type_lookup.synonym`) intact and the
+type still resolves (search_path includes `extensions`). Advisor after:
+0 `security_definer_view`, 0 `extension_in_public`, 14 `rls_enabled_no_policy`
+INFO (unchanged — the intended deny-all posture). Decision (final): Austin's
+team uses the dashboard only (`service_role`), no anon API access. Repo rollback
+checkpoint: tag `pre-security-cleanup-2026-06-18` at `1602d06`.
+
+---
+
 ## 2026-06-13 — Acceptance-flag regression found and fixed (pre-handoff scope evaluation)
 
 Pre-handoff evaluation of GitHub and Supabase surfaced a client-visible
